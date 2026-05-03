@@ -15,5 +15,8 @@ venv/
 # macOS
 .DS_Store
 
+# Medical archive — contains personal health data, never commit
+/archive/
+
 # Test archives created during development
 /tmp/phr-*

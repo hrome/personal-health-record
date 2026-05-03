@@ -10,6 +10,11 @@ description: >
   history", "find all prescriptions from last year", "how has my hemoglobin changed",
   "что показал анализ крови", "добавь результаты анализов". Supports Russian and
   English documents (mixed-language documents are handled correctly).
+  Also trigger reactively: after reading and analyzing any PDF in chat that turns
+  out to be a medical document (lab results, doctor visit notes, imaging studies,
+  discharge summaries, prescriptions, vaccinations) — append an offer to save it
+  to the Personal Health Record archive at the end of the response, even if the
+  user did not ask about the archive.
 compatibility:
   - Python packages: anthropic, pdfplumber (bulk/folder mode only)
   - APIs: Anthropic API — only for bulk folder imports; in-session mode uses the current Claude session
@@ -420,7 +425,46 @@ pip install -r ~/.claude/skills/personal-health-record/requirements.txt
 
 ## Proactive Detection
 
-If the user uploads a medical-looking PDF **without** explicitly invoking this skill:
+### After analyzing a medical PDF in chat
+
+When Claude reads a PDF and determines it is a medical document, append this offer
+at the end of the response — regardless of whether the user mentioned the archive:
+
+> "Сохранить этот документ в архив? Тогда в следующих сессиях можно задавать
+> вопросы по нему без повторной загрузки."
+
+or in English:
+
+> "Want me to save this document to your archive? You'll be able to query it
+> in future sessions without uploading it again."
+
+**If the user agrees:**
+
+1. Ask for BASE_PATH if not already known:
+   > "Where is your archive? (e.g. `/Users/roman/medical-archive`)"
+
+2. Format the data already extracted during analysis as a JSON object following
+   the extraction schema (see **Extraction Schema** section). Do not re-read the
+   file — use the data already in context.
+
+3. Run:
+   ```bash
+   python ~/.claude/skills/personal-health-record/scripts/save_extraction.py \
+     --base-path <BASE_PATH> \
+     --pdf-path <path_to_pdf> \
+     --extraction '<json>'
+   ```
+
+4. Report the result:
+   > "Saved. Document type: lab result — 24 indicators. You can now ask questions
+   > about it across sessions."
+
+**If BASE_PATH is not set up yet:**
+> "You haven't set up an archive yet. It only takes a second — where should I
+> store your medical files? (e.g. `/Users/roman/medical-archive`)"
+> Then proceed with saving.
+
+### User uploads a PDF without asking for analysis
 
 > "I see you've uploaded what looks like a medical document. Would you like me to
 > process it through your Personal Health Record skill? It'll be saved to your archive
