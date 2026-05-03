@@ -31,6 +31,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 from init_db import init_db
 
 
+def _sv(v):
+    """Serialize dict/list to JSON string so SQLite can bind it."""
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    return v
+
+
 def sha1_of_file(path: str) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as f:
@@ -64,10 +71,10 @@ def db_insert_lab(conn: sqlite3.Connection, sha1: str, s: dict, meta: dict) -> N
         "laboratory_name, laboratory_address, laboratory_city, ordering_doctor, "
         "performing_doctor, report_date, total_indicators_count, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (sha1, s.get("collection_date"), meta.get("patient_full_name"), meta.get("patient_dob"),
-         s.get("laboratory_name"), s.get("laboratory_address"), s.get("laboratory_city"),
-         s.get("ordering_doctor"), s.get("performing_doctor"), s.get("report_date"),
-         len(s.get("indicators") or []), s.get("notes")),
+        (sha1, _sv(s.get("collection_date")), _sv(meta.get("patient_full_name")), _sv(meta.get("patient_dob")),
+         _sv(s.get("laboratory_name")), _sv(s.get("laboratory_address")), _sv(s.get("laboratory_city")),
+         _sv(s.get("ordering_doctor")), _sv(s.get("performing_doctor")), _sv(s.get("report_date")),
+         len(s.get("indicators") or []), _sv(s.get("notes"))),
     )
     event_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ind in s.get("indicators") or []:
@@ -77,13 +84,13 @@ def db_insert_lab(conn: sqlite3.Connection, sha1: str, s: dict, meta: dict) -> N
             "value_raw, value_numeric, unit, ref_range_low, ref_range_high, ref_range_text, "
             "ref_range_notes, range_status, flag, method, other_notes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event_id, sha1, s.get("collection_date"),
-             ind.get("indicator_name"), ind.get("indicator_name_en"),
-             ind.get("value_raw"), ind.get("value_numeric"), ind.get("unit"),
+            (event_id, sha1, _sv(s.get("collection_date")),
+             _sv(ind.get("indicator_name")), _sv(ind.get("indicator_name_en")),
+             _sv(ind.get("value_raw")), ind.get("value_numeric"), _sv(ind.get("unit")),
              ind.get("ref_range_low"), ind.get("ref_range_high"),
-             ind.get("ref_range_text"), ind.get("ref_range_notes"),
-             ind.get("range_status"), ind.get("flag"),
-             ind.get("method"), ind.get("other_notes")),
+             _sv(ind.get("ref_range_text")), _sv(ind.get("ref_range_notes")),
+             _sv(ind.get("range_status")), _sv(ind.get("flag")),
+             _sv(ind.get("method")), _sv(ind.get("other_notes"))),
         )
 
 
@@ -95,12 +102,12 @@ def db_insert_doctor_visit(conn: sqlite3.Connection, sha1: str, s: dict, meta: d
         "objective_findings, diagnosis_main, diagnosis_icd, diagnosis_secondary, "
         "treatment_plan, medications_prescribed, recommendations, next_visit_date, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (sha1, s.get("visit_date"), meta.get("patient_full_name"), meta.get("patient_dob"),
-         s.get("doctor_full_name"), s.get("doctor_specialty"), s.get("clinic_name"),
-         s.get("clinic_address"), s.get("chief_complaint"), s.get("anamnesis"),
-         s.get("objective_findings"), s.get("diagnosis_main"), s.get("diagnosis_icd"),
-         s.get("diagnosis_secondary"), s.get("treatment_plan"), s.get("medications_prescribed"),
-         s.get("recommendations"), s.get("next_visit_date"), s.get("notes")),
+        (sha1, _sv(s.get("visit_date")), _sv(meta.get("patient_full_name")), _sv(meta.get("patient_dob")),
+         _sv(s.get("doctor_full_name")), _sv(s.get("doctor_specialty")), _sv(s.get("clinic_name")),
+         _sv(s.get("clinic_address")), _sv(s.get("chief_complaint")), _sv(s.get("anamnesis")),
+         _sv(s.get("objective_findings")), _sv(s.get("diagnosis_main")), _sv(s.get("diagnosis_icd")),
+         _sv(s.get("diagnosis_secondary")), _sv(s.get("treatment_plan")), _sv(s.get("medications_prescribed")),
+         _sv(s.get("recommendations")), _sv(s.get("next_visit_date")), _sv(s.get("notes"))),
     )
 
 
@@ -112,11 +119,11 @@ def db_insert_imaging(conn: sqlite3.Connection, sha1: str, s: dict, meta: dict) 
         "protocol, contrast_used, description, conclusion, recommendations, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (sha1, s.get("study_date"), s.get("study_type"), s.get("body_region"),
-         meta.get("patient_full_name"), meta.get("patient_dob"),
-         s.get("referring_doctor"), s.get("performing_doctor"), s.get("radiologist"),
-         s.get("clinic_name"), s.get("equipment_model"), s.get("protocol"),
-         s.get("contrast_used"), s.get("description"), s.get("conclusion"),
-         s.get("recommendations"), s.get("notes")),
+         _sv(meta.get("patient_full_name")), _sv(meta.get("patient_dob")),
+         _sv(s.get("referring_doctor")), _sv(s.get("performing_doctor")), _sv(s.get("radiologist")),
+         _sv(s.get("clinic_name")), _sv(s.get("equipment_model")), _sv(s.get("protocol")),
+         _sv(s.get("contrast_used")), _sv(s.get("description")), _sv(s.get("conclusion")),
+         _sv(s.get("recommendations")), _sv(s.get("notes"))),
     )
 
 
@@ -128,12 +135,12 @@ def db_insert_discharge(conn: sqlite3.Connection, sha1: str, s: dict, meta: dict
         "diagnosis_on_discharge, diagnosis_icd, procedures_performed, treatment_summary, "
         "discharge_condition, discharge_medications, follow_up_instructions, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (sha1, meta.get("patient_full_name"), meta.get("patient_dob"),
-         s.get("admission_date"), s.get("discharge_date"), s.get("ward"),
-         s.get("hospital_name"), s.get("attending_doctor"), s.get("admission_reason"),
-         s.get("diagnosis_on_admission"), s.get("diagnosis_on_discharge"), s.get("diagnosis_icd"),
-         s.get("procedures_performed"), s.get("treatment_summary"), s.get("discharge_condition"),
-         s.get("discharge_medications"), s.get("follow_up_instructions"), s.get("notes")),
+        (sha1, _sv(meta.get("patient_full_name")), _sv(meta.get("patient_dob")),
+         _sv(s.get("admission_date")), _sv(s.get("discharge_date")), _sv(s.get("ward")),
+         _sv(s.get("hospital_name")), _sv(s.get("attending_doctor")), _sv(s.get("admission_reason")),
+         _sv(s.get("diagnosis_on_admission")), _sv(s.get("diagnosis_on_discharge")), _sv(s.get("diagnosis_icd")),
+         _sv(s.get("procedures_performed")), _sv(s.get("treatment_summary")), _sv(s.get("discharge_condition")),
+         _sv(s.get("discharge_medications")), _sv(s.get("follow_up_instructions")), _sv(s.get("notes"))),
     )
 
 
@@ -144,10 +151,10 @@ def db_insert_prescription(conn: sqlite3.Connection, sha1: str, s: dict, meta: d
         "doctor_specialty, clinic_name, medication_name, dosage, form, frequency, duration, "
         "instructions, prescription_number, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (sha1, s.get("prescription_date"), meta.get("patient_full_name"), meta.get("patient_dob"),
-         s.get("doctor_full_name"), s.get("doctor_specialty"), s.get("clinic_name"),
-         s.get("medication_name"), s.get("dosage"), s.get("form"), s.get("frequency"),
-         s.get("duration"), s.get("instructions"), s.get("prescription_number"), s.get("notes")),
+        (sha1, _sv(s.get("prescription_date")), _sv(meta.get("patient_full_name")), _sv(meta.get("patient_dob")),
+         _sv(s.get("doctor_full_name")), _sv(s.get("doctor_specialty")), _sv(s.get("clinic_name")),
+         _sv(s.get("medication_name")), _sv(s.get("dosage")), _sv(s.get("form")), _sv(s.get("frequency")),
+         _sv(s.get("duration")), _sv(s.get("instructions")), _sv(s.get("prescription_number")), _sv(s.get("notes"))),
     )
 
 
@@ -158,10 +165,10 @@ def db_insert_vaccination(conn: sqlite3.Connection, sha1: str, s: dict, meta: di
         "disease_targeted, manufacturer, batch_number, dose_number, clinic_name, "
         "administering_doctor, next_dose_date, notes) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (sha1, s.get("vaccination_date"), meta.get("patient_full_name"), meta.get("patient_dob"),
-         s.get("vaccine_name"), s.get("disease_targeted"), s.get("manufacturer"),
-         s.get("batch_number"), s.get("dose_number"), s.get("clinic_name"),
-         s.get("administering_doctor"), s.get("next_dose_date"), s.get("notes")),
+        (sha1, _sv(s.get("vaccination_date")), _sv(meta.get("patient_full_name")), _sv(meta.get("patient_dob")),
+         _sv(s.get("vaccine_name")), _sv(s.get("disease_targeted")), _sv(s.get("manufacturer")),
+         _sv(s.get("batch_number")), _sv(s.get("dose_number")), _sv(s.get("clinic_name")),
+         _sv(s.get("administering_doctor")), _sv(s.get("next_dose_date")), _sv(s.get("notes"))),
     )
 
 

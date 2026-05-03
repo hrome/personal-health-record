@@ -83,6 +83,7 @@ Record BASE_PATH and the chosen method for the session.
 | "how has my [indicator] changed", "trend", "chart" | trends | `query_db.py` |
 | "export", "give me a CSV", "backup" | export | `export_csv.py` |
 | "re-extract", "update this file", "reprocess" | reprocess | `save_extraction.py --force` |
+| "delete this file", "remove from archive", "удали файл из архива" | delete | `delete_from_archive.py` |
 
 ---
 
@@ -95,13 +96,38 @@ Two modes — choose based on how the user provides files.
 **No ANTHROPIC_API_KEY required.** Claude extracts the PDF directly in the current session,
 which is faster and avoids an extra API round-trip.
 
-**Step 1 — Read the PDF**
-Use the `Read` tool on the file path. For a file attached in chat, use its path directly.
+**Step 1 — Hash all uploaded files first**
+Before reading or extracting anything from any uploaded PDF, Claude must first compute the SHA-1
+for every file in the batch and check whether each hash already exists in the `files` table.
+This check is cheap and must always happen first.
 
-**Step 2 — Extract structured data (Claude does this inline)**
-Apply the extraction schema below and produce a JSON object with the required structure.
+Use the same helper logic as the scripts:
+- compute SHA-1 from the original PDF file
+- query `files` by `sha1`
 
-**Step 3 — Save to archive**
+**Step 2 — Tell the user which files are already archived and which are new**
+Before any extraction starts, Claude must report the deduplication result for every uploaded file.
+This per-file status output is mandatory for every upload batch, regardless of how many files were provided and regardless of whether files are duplicates, newly saved, failed, or mixed.
+For each file, show at minimum:
+- file name
+- SHA-1
+- whether it is already present in the archive
+- if already present: `import_timestamp`
+- if not present: that it will now be processed and saved
+
+If a matching row exists, do not extract that PDF again unless the user explicitly asks to re-process it with `--force`.
+
+**Step 3 — Read only the files that are not yet archived**
+Use the `Read` tool on each file path that is not already present in the archive. Skip files that already exist.
+
+**Step 4 — Extract structured data (Claude does this inline)**
+Apply the extraction schema below and produce a JSON object with the required structure for each new file.
+
+**Step 5 — Save newly extracted files to the archive immediately**
+After extraction, Claude should save each newly processed file to the archive in the same run.
+Do not pause for a separate confirmation step once the user has asked to process the files.
+
+Use:
 ```bash
 python scripts/save_extraction.py \
   --base-path <BASE_PATH> \
@@ -118,7 +144,34 @@ python scripts/save_extraction.py \
 EOF
 ```
 
-**Step 4 — Report to user** (same format as Mode B below).
+**Step 6 — Show a user-facing detailed result for every file**
+After deduplication, extraction, and saving, Claude must show a detailed result covering every uploaded file,
+including files that were skipped as duplicates and files that were newly saved.
+This final report is mandatory for every file in the batch, regardless of status and regardless of the total number of files.
+For each file, the output must include:
+- the file name
+- the SHA-1
+- whether it was skipped as already archived or newly saved
+- if skipped: the existing import timestamp
+- the detected document type
+- the document date, if available
+- the clinic, lab, or provider name, if available
+- the patient name, if available
+- the brief description
+- if newly saved: the key extracted contents from `structured`
+
+If a file was already in the archive, the report must still include its status and existing import timestamp.
+If a file was newly saved, the report must include both its status and a detailed summary of what was extracted from that file.
+
+For `lab_result`, the summary must include:
+- the indicator count
+- a table of extracted indicators
+- the table must include, when available: indicator name, result, unit, reference range, and status
+- the table must include all extracted indicators from the file, not just a subset or first few rows
+- any abnormal or out-of-range indicators called out explicitly
+
+For other document types, the summary should list the main extracted fields relevant to that type
+(for example diagnosis, conclusion, medications, recommendations, visit date, study type).
 
 ---
 
@@ -143,6 +196,12 @@ The script handles deduplication, extraction, and DB writing automatically.
 
 Both modes compute SHA-1 before doing any work. If the hash already exists in `files`:
 > "Skipping `{filename}` — already imported on {import_timestamp}."
+
+For Mode A specifically:
+- compute hashes for the entire uploaded batch first
+- report duplicate/new status to the user before any extraction
+- extract and save only the files that are not already present
+- still include duplicate files in the final per-file report
 
 Use `--force` to re-process an existing file.
 
@@ -187,6 +246,15 @@ Done! Imported 3 files:
 • Ultrasound_March_2025.pdf — abdominal ultrasound — City Hospital, 2025-03-10
 • GP_Visit_April_2025.pdf — GP consultation — Dr. Ivanov, 2025-04-02
 ```
+
+**Format rules:**
+- For every `lab_result` file, the indicator count **must** always be shown in parentheses: `(N indicators)`. Never omit it for lab results, even if N = 1.
+- For other document types (imaging, visit, etc.), the indicator count is not shown.
+- In Mode A (in-session), the count is the length of the `indicators` array in the extracted JSON.
+- In Mode B (bulk import), the count comes from `indicators_count` in the script's JSON output.
+- In Mode A, the final interactive report must also show the SHA-1 for every file.
+- In Mode A, the final interactive report must cover both skipped duplicates and newly saved files.
+- In Mode A, after any upload, always produce a per-file report for every file, even if all files were duplicates, even if only one file was provided, and even if the batch contains a mix of statuses.
 
 **If PDF has no readable text:**
 > "Couldn't extract text from `{filename}`. It may be corrupted, password-protected,
@@ -264,6 +332,55 @@ Always **cite the source file** (original_filename + date) for every fact stated
 
 ---
 
+## Deleting Files From The Archive
+
+Deletion is supported only by **SHA-1 hash**. Do not accept filename-only deletion requests.
+
+### Required flow
+
+1. Ask the user for the file SHA-1 if they have not provided it yet.
+2. Run:
+
+```bash
+python scripts/delete_from_archive.py --base-path <BASE_PATH> --sha1 <SHA1>
+```
+
+3. Show the user a short summary from the returned JSON before deleting anything.
+   The summary must include at minimum:
+   - `sha1`
+   - `original_filename`
+   - `import_timestamp`
+   - `document_type`
+   - `brief_description`
+   - whether the original PDF and JSON extraction currently exist
+4. Ask for explicit confirmation.
+5. Only after the user confirms, run:
+
+```bash
+python scripts/delete_from_archive.py \
+  --base-path <BASE_PATH> \
+  --sha1 <SHA1> \
+  --delete \
+  --confirm
+```
+
+### What deletion must remove
+
+After confirmation, delete all archive data associated with that SHA-1:
+- `original_files/<SHA1>.pdf`
+- `json_extractions/<SHA1>.json`
+- the row in `files`
+- all rows in typed tables where `file_sha1 = <SHA1>`
+
+### Confirmation policy
+
+- Never delete immediately after receiving the SHA-1.
+- Always show the file summary first.
+- Always require an explicit user confirmation message before running `--delete --confirm`.
+- If the SHA-1 is not found, tell the user that no archived file exists for that hash and do not ask for confirmation.
+
+---
+
 ## Quick Start
 
 ```bash
@@ -289,6 +406,18 @@ python scripts/query_db.py \
 python scripts/export_csv.py \
   --base-path ~/medical-archive \
   --output-dir ~/medical-export
+
+# 6. Inspect a file before deleting it
+python scripts/delete_from_archive.py \
+  --base-path ~/medical-archive \
+  --sha1 <SHA1>
+
+# 7. Delete a file after confirmation
+python scripts/delete_from_archive.py \
+  --base-path ~/medical-archive \
+  --sha1 <SHA1> \
+  --delete \
+  --confirm
 ```
 
 ---
@@ -427,46 +556,22 @@ pip install -r ~/.claude/skills/personal-health-record/requirements.txt
 
 ### After analyzing a medical PDF in chat
 
-When Claude reads a PDF and determines it is a medical document, append this offer
-at the end of the response — regardless of whether the user mentioned the archive:
-
-> "Сохранить этот документ в архив? Тогда в следующих сессиях можно задавать
-> вопросы по нему без повторной загрузки."
-
-or in English:
-
-> "Want me to save this document to your archive? You'll be able to query it
-> in future sessions without uploading it again."
-
-**If the user agrees:**
-
-1. Ask for BASE_PATH if not already known:
-   > "Where is your archive? (e.g. `/Users/roman/medical-archive`)"
-
-2. Format the data already extracted during analysis as a JSON object following
-   the extraction schema (see **Extraction Schema** section). Do not re-read the
-   file — use the data already in context.
-
-3. Run:
-   ```bash
-   python ~/.claude/skills/personal-health-record/scripts/save_extraction.py \
-     --base-path <BASE_PATH> \
-     --pdf-path <path_to_pdf> \
-     --extraction '<json>'
-   ```
-
-4. Report the result:
-   > "Saved. Document type: lab result — 24 indicators. You can now ask questions
-   > about it across sessions."
+When Claude receives one or more medical PDFs in chat, it should:
+1. compute SHA-1 for all uploaded files
+2. check which ones already exist in the archive
+3. tell the user that duplicate/new status before any extraction
+4. extract only the files that are not already archived
+5. save those newly extracted files immediately
+6. return a detailed per-file report including SHA-1 and extracted contents
 
 **If BASE_PATH is not set up yet:**
 > "You haven't set up an archive yet. It only takes a second — where should I
 > store your medical files? (e.g. `/Users/roman/medical-archive`)"
-> Then proceed with saving.
+> Then proceed with hashing, deduplication, extraction, and saving.
 
 ### User uploads a PDF without asking for analysis
 
 > "I see you've uploaded what looks like a medical document. Would you like me to
-> process it through your Personal Health Record skill? It'll be saved to your archive
+> first check whether it's already in your archive, and then process and save only the files that are not already there through your Personal Health Record skill? It'll be saved to your archive
 > and you can reference it in future questions without re-uploading.
 > If you haven't set up the skill yet, I can do that now — it only takes a minute."

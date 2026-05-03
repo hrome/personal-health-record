@@ -226,7 +226,7 @@ def main():
         init_db(args.base_path)
 
     pdfs = [args.pdf_path] if args.pdf_path else sorted(
-        str(p) for p in Path(args.folder).glob("*.pdf")
+        str(p) for p in Path(args.folder).glob("*.[pP][dD][fF]")
     )
     if not pdfs:
         print(json.dumps({"status": "error", "error": f"No PDF files found in {args.folder}"}))
