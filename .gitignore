@@ -1,0 +1,19 @@
+# Environment — contains API keys, never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Test archives created during development
+/tmp/phr-*
