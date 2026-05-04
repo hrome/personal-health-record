@@ -2,13 +2,13 @@
 
 A skill for [Claude Code](https://claude.ai/code) that helps you organize and analyze your personal medical documents: lab results, doctor visits, imaging studies (MRI, CT, ultrasound, ECG), discharge summaries, prescriptions, and vaccination records.
 
-Supports **Russian and English** documents. Everything is stored locally on your machine.
+Supports **Russian and English** documents. All extracted data is stored locally on your machine.
 
 ---
 
 ## What it does
 
-**Add documents** — attach a PDF in chat or point Claude to a folder. Claude reads and understands the document, extracts all structured data, and saves it to a local archive.
+**Add documents** — share a medical PDF with Claude in any way that's convenient: attach it in chat, give a local file path, or load it from a cloud service via MCP. Claude reads the document, extracts all structured data, and saves it to a local archive.
 
 **Ask questions in plain language:**
 - "What was my hemoglobin last January?"
@@ -99,30 +99,13 @@ Claude will ask where to store your archive and how you'd like to add files, the
 
 ## Adding documents
 
-**In chat** — attach one or several PDFs directly in the message. Claude reads them and extracts all data within the same session. No API key needed for this mode.
+Share a medical document with Claude in whatever way is most convenient:
 
-**From a folder** — tell Claude the folder path:
-> "Import all PDFs from ~/Downloads/medical-docs"
+- **Attach in chat** — drag a PDF into the message field. Claude reads it directly in the session.
+- **Local path** — tell Claude a file or folder path: "Import all PDFs from ~/Downloads/medical-docs". Claude reads each file from disk.
+- **Cloud or MCP** — load a file from Google Drive, Dropbox, or any connected MCP server.
 
-This mode calls the Anthropic API once per file and requires an API key (see [Configuration](#configuration)).
-
----
-
-## Configuration
-
-For **bulk folder imports** only, you need an Anthropic API key:
-
-```bash
-cp ~/.claude/skills/personal-health-record/.env.example \
-   ~/.claude/skills/personal-health-record/.env
-```
-
-Open `.env` and set:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-When adding files one by one through the chat, no API key is needed.
+Claude extracts all structured data within the same session and saves it to the local archive. No API key required.
 
 ---
 
@@ -141,10 +124,10 @@ When adding files one by one through the chat, no API key is needed.
 
 ## Privacy
 
-- All files and extracted data are stored **on your machine only**
-- When adding files through the chat, no data leaves the Claude Code session
-- When using bulk folder import, PDF text is sent to the Anthropic API — see [Anthropic's privacy policy](https://www.anthropic.com/privacy)
-- Do not use this skill for other people's medical records without their consent
+- All extracted data and original files are stored **locally** in the archive folder you choose.
+- Document content passes through Anthropic's infrastructure as part of the Claude session — the same as any conversation you have with Claude Code.
+- There is no separate batch ingestion API call and no dedicated server-side storage of your records.
+- Do not use this skill for other people's medical records without their consent.
 
 ---
 

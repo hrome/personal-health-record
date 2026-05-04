@@ -16,15 +16,13 @@ description: >
   to the Personal Health Record archive at the end of the response, even if the
   user did not ask about the archive.
 compatibility:
-  - Python packages: anthropic, pdfplumber (bulk/folder mode only)
-  - APIs: Anthropic API — only for bulk folder imports; in-session mode uses the current Claude session
   - Storage: SQLite local — no external services required
 ---
 
 # Personal Health Record
 
-Ingests, deduplicates, and analyzes personal medical documents using a local
-3-layer archive. All data stays on the user's machine.
+Reads medical documents, extracts relevant information, and keeps everything in a local 3-layer archive.
+Analyzes the data on request — tracks lab trends, surfaces past diagnoses, and answers questions about health history.
 
 ## Architecture
 
@@ -64,8 +62,8 @@ After the user provides BASE_PATH, ask:
 
 > "Got it. How would you like to provide files?
 > A) Attach PDFs directly in this chat (great for 1–20 files)
-> B) Give me a folder path on your computer (good for bulk imports)
-> C) Other source (Google Drive, email, clinic API)"
+> B) Give me a folder path on your computer — I'll read each file in this session
+> C) Other source (Google Drive, email, clinic website via MCP)"
 
 Record BASE_PATH and the chosen method for the session.
 
@@ -73,10 +71,11 @@ Record BASE_PATH and the chosen method for the session.
 
 ## Operational Modes
 
-| User says | Mode | Script |
-|-----------|------|--------|
-| PDF attached in chat | **in-session ingest** | Claude reads + `save_extraction.py` |
-| "add folder", "bulk import", "process all PDFs" | **bulk ingest** | `ingest.py` |
+| User says | Action | Script |
+|-----------|--------|--------|
+| PDF attached in chat | in-session ingest | Claude reads + `save_extraction.py` |
+| "add folder", "import all PDFs from …" | in-session ingest (multiple files) | Claude reads each + `save_extraction.py` |
+| File loaded from cloud/MCP | in-session ingest | Claude reads + `save_extraction.py` |
 | Any medical question | query | `query_db.py` |
 | "how many files", "what's in my archive", "show summary" | status | `query_db.py` |
 | "show my timeline", "history", "what happened in 2024" | timeline | `query_db.py` |
@@ -89,25 +88,19 @@ Record BASE_PATH and the chosen method for the session.
 
 ## Ingestion Pipeline
 
-Two modes — choose based on how the user provides files.
+Documents can reach the agent in multiple ways — attached in chat, read from a local
+path on disk, or loaded from a cloud service or MCP server. The ingestion pipeline is
+the same regardless of source.
 
-### Mode A — In-Session (PDF attached in chat)
-
-**No ANTHROPIC_API_KEY required.** Claude extracts the PDF directly in the current session,
-which is faster and avoids an extra API round-trip.
-
-**Step 1 — Hash all uploaded files first**
-Before reading or extracting anything from any uploaded PDF, Claude must first compute the SHA-1
-for every file in the batch and check whether each hash already exists in the `files` table.
+**Step 1 — Hash all files first for Deduplication**
+Before reading or extracting anything from any PDF, compute the SHA-1
+for every file in the batch and check whether each hash already exists in the `original_files` folder.
 This check is cheap and must always happen first.
 
-Use the same helper logic as the scripts:
-- compute SHA-1 from the original PDF file
-- query `files` by `sha1`
-
 **Step 2 — Tell the user which files are already archived and which are new**
-Before any extraction starts, Claude must report the deduplication result for every uploaded file.
-This per-file status output is mandatory for every upload batch, regardless of how many files were provided and regardless of whether files are duplicates, newly saved, failed, or mixed.
+Before any extraction starts, report the deduplication result for every file.
+This per-file status output is mandatory for every upload batch, regardless of how many
+files were provided and regardless of whether files are duplicates, newly saved, failed, or mixed.
 For each file, show at minimum:
 - file name
 - SHA-1
@@ -115,26 +108,22 @@ For each file, show at minimum:
 - if already present: `import_timestamp`
 - if not present: that it will now be processed and saved
 
-If a matching row exists, do not extract that PDF again unless the user explicitly asks to re-process it with `--force`.
+If a matching file exists, do not extract that PDF again unless the user explicitly asks to
+re-process it with `--force`.
 
 **Step 3 — Read only the files that are not yet archived**
-Use the `Read` tool on each file path that is not already present in the archive. Skip files that already exist.
+Use the `Read` tool on each file path that is not already present in the archive.
+Skip files that already exist.
 
 **Step 4 — Extract structured data (Claude does this inline)**
-Apply the extraction schema below and produce a JSON object with the required structure for each new file.
+Apply the extraction schema below and produce a JSON object with the required structure
+for each new file.
 
 **Step 5 — Save newly extracted files to the archive immediately**
-After extraction, Claude should save each newly processed file to the archive in the same run.
+After extraction, save each newly processed file to the archive in the same run.
 Do not pause for a separate confirmation step once the user has asked to process the files.
 
 Use:
-```bash
-python scripts/save_extraction.py \
-  --base-path <BASE_PATH> \
-  --pdf-path <path_to_original_pdf> \
-  --extraction '<json_string>'
-```
-For long JSON, pass via stdin to avoid shell quoting issues:
 ```bash
 python scripts/save_extraction.py \
   --base-path <BASE_PATH> \
@@ -144,15 +133,17 @@ python scripts/save_extraction.py \
 EOF
 ```
 
-**Step 6 — Show a user-facing detailed result for every file**
-After deduplication, extraction, and saving, Claude must show a detailed result covering every uploaded file,
+**Step 6 — Show a user-facing detailed result**
+After deduplication, extraction, and saving, show a detailed result covering every file,
 including files that were skipped as duplicates and files that were newly saved.
-This final report is mandatory for every file in the batch, regardless of status and regardless of the total number of files.
+This final report is mandatory for every file in the batch, regardless of status and
+regardless of the total number of files.
 For each file, the output must include:
-- the file name
+- the original file name
 - the SHA-1
 - whether it was skipped as already archived or newly saved
-- if skipped: the existing import timestamp
+- if skipped as duplicate: still include the file in the report with its existing
+  import_timestamp — never silently omit duplicate files from the final output
 - the detected document type
 - the document date, if available
 - the clinic, lab, or provider name, if available
@@ -160,8 +151,6 @@ For each file, the output must include:
 - the brief description
 - if newly saved: the key extracted contents from `structured`
 
-If a file was already in the archive, the report must still include its status and existing import timestamp.
-If a file was newly saved, the report must include both its status and a detailed summary of what was extracted from that file.
 
 For `lab_result`, the summary must include:
 - the indicator count
@@ -175,39 +164,7 @@ For other document types, the summary should list the main extracted fields rele
 
 ---
 
-### Mode B — Bulk Folder Import
-
-**Requires ANTHROPIC_API_KEY.** The script calls the Anthropic API once per file.
-Use for importing a folder of PDFs or when not working interactively.
-
-```bash
-# Single file
-python scripts/ingest.py --base-path <BASE_PATH> --pdf-path <file.pdf>
-
-# Entire folder
-python scripts/ingest.py --base-path <BASE_PATH> --folder <folder_path>
-```
-
-The script handles deduplication, extraction, and DB writing automatically.
-
----
-
-### Deduplication (both modes)
-
-Both modes compute SHA-1 before doing any work. If the hash already exists in `files`:
-> "Skipping `{filename}` — already imported on {import_timestamp}."
-
-For Mode A specifically:
-- compute hashes for the entire uploaded batch first
-- report duplicate/new status to the user before any extraction
-- extract and save only the files that are not already present
-- still include duplicate files in the final per-file report
-
-Use `--force` to re-process an existing file.
-
----
-
-### Extraction Schema (for in-session Mode A)
+### Extraction Schema
 
 Claude must produce a JSON object with this top-level structure:
 
@@ -235,26 +192,6 @@ For `lab_result`, `structured` must also contain an `indicators` array (one obje
 - Use `null` for any field not found — never invent values.
 - Preserve original field values in their source language (ru/en).
 - For `range_status` in lab indicators: `normal`, `above`, `below`, or `null` if unknown.
-
----
-
-### After ingest — report to user
-
-```
-Done! Imported 3 files:
-• KLA_January_2025.pdf — lab result (18 indicators) — Invitro, 2025-01-15
-• Ultrasound_March_2025.pdf — abdominal ultrasound — City Hospital, 2025-03-10
-• GP_Visit_April_2025.pdf — GP consultation — Dr. Ivanov, 2025-04-02
-```
-
-**Format rules:**
-- For every `lab_result` file, the indicator count **must** always be shown in parentheses: `(N indicators)`. Never omit it for lab results, even if N = 1.
-- For other document types (imaging, visit, etc.), the indicator count is not shown.
-- In Mode A (in-session), the count is the length of the `indicators` array in the extracted JSON.
-- In Mode B (bulk import), the count comes from `indicators_count` in the script's JSON output.
-- In Mode A, the final interactive report must also show the SHA-1 for every file.
-- In Mode A, the final interactive report must cover both skipped duplicates and newly saved files.
-- In Mode A, after any upload, always produce a per-file report for every file, even if all files were duplicates, even if only one file was provided, and even if the batch contains a mix of statuses.
 
 **If PDF has no readable text:**
 > "Couldn't extract text from `{filename}`. It may be corrupted, password-protected,
@@ -384,35 +321,26 @@ After confirmation, delete all archive data associated with that SHA-1:
 ## Quick Start
 
 ```bash
-# For in-session mode — no setup needed beyond BASE_PATH
-# Just attach a PDF in chat and Claude handles extraction directly.
+# In-session processing — no setup beyond BASE_PATH.
+# Attach a PDF in chat or give Claude a file path.
 
-# For bulk/folder mode — install dependencies first:
-pip install anthropic pdfplumber --break-system-packages
-
-# Configure API key (bulk mode only)
-cp .env.example .env   # set ANTHROPIC_API_KEY
-
-# Ingest a folder of PDFs via API
-python scripts/ingest.py --base-path ~/medical-archive --folder ~/Downloads/medical-pdfs
-
-# 4. Query
+# Query the database
 python scripts/query_db.py \
   --base-path ~/medical-archive \
   --sql "SELECT original_filename, document_type, brief_description FROM files" \
   --format table
 
-# 5. Export all tables to CSV
+# Export all tables to CSV
 python scripts/export_csv.py \
   --base-path ~/medical-archive \
   --output-dir ~/medical-export
 
-# 6. Inspect a file before deleting it
+# Inspect a file before deleting it
 python scripts/delete_from_archive.py \
   --base-path ~/medical-archive \
   --sha1 <SHA1>
 
-# 7. Delete a file after confirmation
+# Delete a file after confirmation
 python scripts/delete_from_archive.py \
   --base-path ~/medical-archive \
   --sha1 <SHA1> \
@@ -497,10 +425,9 @@ python scripts/delete_from_archive.py \
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Bulk mode only | Not needed when Claude processes PDFs in-session |
 | `BASE_PATH` | Optional | Default archive path (can also pass `--base-path` per command) |
 
-Copy `.env.example` to `.env` and fill in values. The scripts read `.env` automatically.
+Copy `.env.example` to `.env` and set `BASE_PATH` if desired. The scripts read `.env` automatically.
 
 ---
 
@@ -508,7 +435,6 @@ Copy `.env.example` to `.env` and fill in values. The scripts read `.env` automa
 
 - **Duplicate**: `{"status": "duplicate", "imported_on": "..."}` — no files modified.
 - **No text in PDF**: status `error`, message about corrupted/scanned file.
-- **API failure**: status `error` with API error message. Retry or check `ANTHROPIC_API_KEY`.
 - **errors.log**: one line per failure: `<timestamp> | <sha1> | <filename> | <error>`
 - **Unknown document type**: `document_type = "unknown"` in DB; ask user to clarify.
 
@@ -516,25 +442,20 @@ Copy `.env.example` to `.env` and fill in values. The scripts read `.env` automa
 
 | Error | Fix |
 |-------|-----|
-| `ANTHROPIC_API_KEY not set` | Add key to `.env` |
 | `No text extracted` | Re-export PDF or scan at higher resolution |
-| `Module not found: pdfplumber` | `pip install pdfplumber` |
 | `Database not found` | Run `python scripts/init_db.py --base-path <path>` |
 
 ---
 
 ## Privacy & Security
 
-- **Local storage**: all files and extracted data are stored on the user's machine
-  in the folder they specify. Nothing is sent anywhere automatically.
-- **Anthropic API**: in bulk/folder mode, PDF text is sent to the Anthropic API for extraction.
-  In in-session mode, the PDF is processed within the current Claude Code session only — no
-  separate API call is made. Both modes are subject to
-  [Anthropic's privacy policy](https://www.anthropic.com/privacy).
-  Do not use this skill for third-party medical records without the subject's informed consent.
+- **Local storage**: all files and extracted data are stored in the archive folder you specify.
+- **Session processing**: document content passes through Anthropic's infrastructure as part
+  of the Claude session — the same as any conversation in Claude Code.
 - **No cloud sync**: original_files, json_extractions, and structured_database stay local
-  unless the user explicitly uses a cloud connector.
+  unless you explicitly use a cloud connector.
 - **Backup**: this skill does not back up data. Set up your own backup of BASE_PATH.
+- Do not use this skill for third-party medical records without the subject's informed consent.
 
 ---
 
@@ -551,18 +472,6 @@ pip install -r ~/.claude/skills/personal-health-record/requirements.txt
 ```
 
 ---
-
-## Proactive Detection
-
-### After analyzing a medical PDF in chat
-
-When Claude receives one or more medical PDFs in chat, it should:
-1. compute SHA-1 for all uploaded files
-2. check which ones already exist in the archive
-3. tell the user that duplicate/new status before any extraction
-4. extract only the files that are not already archived
-5. save those newly extracted files immediately
-6. return a detailed per-file report including SHA-1 and extracted contents
 
 **If BASE_PATH is not set up yet:**
 > "You haven't set up an archive yet. It only takes a second — where should I

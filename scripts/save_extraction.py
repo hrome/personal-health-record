@@ -2,8 +2,8 @@
 """
 Save a completed JSON extraction to the archive.
 
-Used by Claude in-session (Claude extracts the PDF itself, then calls this script
-to persist results) and by ingest.py (which calls the Anthropic API first).
+Called by Claude in-session after extracting structured data from a medical
+document (PDF attached in chat, read from a local path, or loaded via MCP).
 
 Usage:
   python scripts/save_extraction.py \\
@@ -11,11 +11,13 @@ Usage:
     --pdf-path ~/Downloads/blood_test.pdf \\
     --extraction '{"document_type": "lab_result", ...}'
 
-  # or pass JSON via stdin:
-  echo '{...}' | python scripts/save_extraction.py \\
+  # or pass JSON via stdin to avoid shell quoting issues:
+  python scripts/save_extraction.py \\
     --base-path ~/medical-archive \\
     --pdf-path ~/Downloads/blood_test.pdf \\
-    --extraction -
+    --extraction - <<'EOF'
+  {...}
+  EOF
 """
 
 import argparse
@@ -186,7 +188,7 @@ def save_to_archive(pdf_path: str, base_path: str, extraction: dict,
                     force: bool = False) -> dict:
     """
     Persist a completed extraction to the archive.
-    Called by Claude in-session and by ingest.py after API extraction.
+    Called by Claude in-session after extracting structured data from a document.
 
     Returns a result dict with status: ingested | duplicate | error.
     """
