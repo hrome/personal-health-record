@@ -67,11 +67,6 @@ The script downloads the skill, places it in the right folder, and installs depe
 3. Unzip the downloaded file
 4. Rename the folder from `personal-health-record-main` to `personal-health-record`
 5. Move the folder to `~/.claude/skills/`
-6. Open Terminal and run:
-   ```bash
-   pip install -r ~/.claude/skills/personal-health-record/requirements.txt
-   ```
-
 ---
 
 ### Option 3 — Git clone
@@ -79,8 +74,6 @@ The script downloads the skill, places it in the right folder, and installs depe
 ```bash
 git clone https://github.com/romahakov/personal-health-record \
   ~/.claude/skills/personal-health-record
-
-pip install -r ~/.claude/skills/personal-health-record/requirements.txt
 ```
 
 Updates: `git pull` inside `~/.claude/skills/personal-health-record`.

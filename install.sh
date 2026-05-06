@@ -79,19 +79,6 @@ fi
 
 mv "$EXTRACTED" "$INSTALL_DIR"
 
-# ── dependencies ─────────────────────────────────────────────────────────────
-
-echo "Installing Python dependencies..."
-
-if python3 -m pip install -r "$INSTALL_DIR/requirements.txt" -q --break-system-packages 2>/dev/null; then
-    : # success
-elif python3 -m pip install -r "$INSTALL_DIR/requirements.txt" -q; then
-    : # success without --break-system-packages
-else
-    yellow "Warning: pip install failed. You may need to run manually:"
-    yellow "  pip install -r $INSTALL_DIR/requirements.txt"
-fi
-
 # ── done ─────────────────────────────────────────────────────────────────────
 
 echo ""

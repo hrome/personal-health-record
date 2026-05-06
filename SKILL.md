@@ -468,7 +468,6 @@ curl -fsSL https://raw.githubusercontent.com/romahakov/personal-health-record/ma
 # Or with git
 git clone https://github.com/romahakov/personal-health-record \
   ~/.claude/skills/personal-health-record
-pip install -r ~/.claude/skills/personal-health-record/requirements.txt
 ```
 
 ---
