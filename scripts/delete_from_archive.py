@@ -2,6 +2,7 @@
 """Inspect and delete archived files by SHA-1 hash."""
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -47,8 +48,11 @@ def get_json_path(base_path: str, sha1: str) -> str:
     return os.path.join(base_path, "json_extractions", f"{sha1}.json")
 
 
-def get_pdf_path(base_path: str, sha1: str) -> str:
-    return os.path.join(base_path, "original_files", f"{sha1}.pdf")
+def get_original_file_path(base_path: str, sha1: str) -> str:
+    matches = glob.glob(os.path.join(base_path, "original_files", f"{sha1}.*"))
+    if not matches:
+        raise FileNotFoundError(f"Original file not found for sha1={sha1}")
+    return matches[0]
 
 
 def load_json_metadata(base_path: str, sha1: str) -> dict:
@@ -75,7 +79,7 @@ def load_json_metadata(base_path: str, sha1: str) -> dict:
     return {key: value for key, value in summary.items() if value is not None}
 
 
-def get_file_summary(base_path: str, sha1: str) -> dict | None:
+def get_file_summary(base_path: str, sha1: str) -> "dict | None":
     db_path = get_db_path(base_path)
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Database not found at {db_path}.")
@@ -88,7 +92,9 @@ def get_file_summary(base_path: str, sha1: str) -> dict | None:
         return None
 
     result = dict(row)
-    result["original_pdf_exists"] = os.path.exists(get_pdf_path(base_path, sha1))
+    result["original_file_exists"] = bool(
+        glob.glob(os.path.join(base_path, "original_files", f"{sha1}.*"))
+    )
     result["json_extraction_exists"] = os.path.exists(get_json_path(base_path, sha1))
     result.update(load_json_metadata(base_path, sha1))
     return result
@@ -111,17 +117,17 @@ def delete_from_archive(base_path: str, sha1: str) -> dict:
         return {"status": "not_found", "sha1": sha1}
 
     db_path = get_db_path(base_path)
-    pdf_path = get_pdf_path(base_path, sha1)
+    original_path = get_original_file_path(base_path, sha1)
     json_path = get_json_path(base_path, sha1)
 
     with sqlite3.connect(db_path) as conn:
         counts = delete_file_records(conn, sha1)
         conn.commit()
 
-    pdf_deleted = False
-    if os.path.exists(pdf_path):
-        os.remove(pdf_path)
-        pdf_deleted = True
+    original_deleted = False
+    if os.path.exists(original_path):
+        os.remove(original_path)
+        original_deleted = True
 
     json_deleted = False
     if os.path.exists(json_path):
@@ -132,7 +138,7 @@ def delete_from_archive(base_path: str, sha1: str) -> dict:
         "status": "deleted",
         "sha1": sha1,
         "deleted_records": counts,
-        "deleted_original_pdf": pdf_deleted,
+        "deleted_original_file": original_deleted,
         "deleted_json_extraction": json_deleted,
         "summary": summary,
     }

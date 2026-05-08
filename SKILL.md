@@ -3,14 +3,14 @@ name: personal-health-record
 description: >
   Medical records assistant for organizing and querying personal health documents
   (lab results, doctor visits, MRI/ultrasound/X-ray/CT/ECG, discharge summaries,
-  prescriptions, vaccinations). Use when users mention adding medical PDFs,
+  prescriptions, vaccinations). Use when users mention adding medical files,
   querying health history, tracking lab indicator trends, reviewing past diagnoses,
   searching prescriptions, or organizing any medical paperwork. Trigger on casual
   mentions like "add my MRI results", "when was my last CBC", "show my vaccination
   history", "find all prescriptions from last year", "how has my hemoglobin changed",
   "что показал анализ крови", "добавь результаты анализов". Supports Russian and
   English documents (mixed-language documents are handled correctly).
-  Also trigger reactively: after reading and analyzing any PDF in chat that turns
+  Also trigger reactively: after reading and analyzing any file in chat that turns
   out to be a medical document (lab results, doctor visit notes, imaging studies,
   discharge summaries, prescriptions, vaccinations) — append an offer to save it
   to the Personal Health Record archive at the end of the response, even if the
@@ -28,7 +28,7 @@ Analyzes the data on request — tracks lab trends, surfaces past diagnoses, and
 
 ```
 <BASE_PATH>/
-├── original_files/          # Original PDFs, named by SHA-1 hash (never modified)
+├── original_files/          # Original files, named by SHA-1 hash (never modified)
 ├── json_extractions/        # Full structured JSON extraction per file
 └── structured_database/
     ├── medical.db           # SQLite — 8 typed tables
@@ -46,7 +46,7 @@ On first use, greet the user with:
 
 > "Hi! This skill helps you organize and analyze your medical documents.
 >
-> **original_files** — your original PDFs, stored unchanged (named by SHA-1 hash).
+> **original_files** — your original files (PDF, JPG, PNG, …), stored unchanged (named by SHA-1 hash).
 > **json_extractions** — full structured JSON extracted from each file.
 > **structured_database** — a local SQLite database with typed tables for each
 >   document type (lab results, doctor visits, imaging studies, etc.).
@@ -61,7 +61,7 @@ On first use, greet the user with:
 After the user provides BASE_PATH, ask:
 
 > "Got it. How would you like to provide files?
-> A) Attach PDFs directly in this chat (great for 1–20 files)
+> A) Attach files directly in this chat (great for 1–20 files)
 > B) Give me a folder path on your computer — I'll read each file in this session
 > C) Other source (Google Drive, email, clinic website via MCP)"
 
@@ -73,8 +73,8 @@ Record BASE_PATH and the chosen method for the session.
 
 | User says | Action | Script |
 |-----------|--------|--------|
-| PDF attached in chat | in-session ingest | Claude reads + `save_extraction.py` |
-| "add folder", "import all PDFs from …" | in-session ingest (multiple files) | Claude reads each + `save_extraction.py` |
+| File attached in chat | in-session ingest | Claude reads + `save_extraction.py` |
+| "add folder", "import all files from …" | in-session ingest (multiple files) | Claude reads each + `save_extraction.py` |
 | File loaded from cloud/MCP | in-session ingest | Claude reads + `save_extraction.py` |
 | Any medical question | query | `query_db.py` |
 | "how many files", "what's in my archive", "show summary" | status | `query_db.py` |
@@ -93,8 +93,9 @@ path on disk, or loaded from a cloud service or MCP server. The ingestion pipeli
 the same regardless of source.
 
 **Step 1 — Hash all files first for Deduplication**
-Before reading or extracting anything from any PDF, compute the SHA-1
-for every file in the batch and check whether each hash already exists in the `original_files` folder.
+Before reading or extracting anything, compute the SHA-1 for every file in the batch
+and check whether each hash already exists in the `original_files` folder
+(search for `{sha1}.*` — the extension varies by file type).
 This check is cheap and must always happen first.
 
 **Step 2 — Tell the user which files are already archived and which are new**
@@ -108,7 +109,7 @@ For each file, show at minimum:
 - if already present: `import_timestamp`
 - if not present: that it will now be processed and saved
 
-If a matching file exists, do not extract that PDF again unless the user explicitly asks to
+If a matching file exists, do not extract it again unless the user explicitly asks to
 re-process it with `--force`.
 
 **Step 3 — Read only the files that are not yet archived**
@@ -127,7 +128,7 @@ Use:
 ```bash
 python scripts/save_extraction.py \
   --base-path <BASE_PATH> \
-  --pdf-path <path_to_original_pdf> \
+  --file-path <path_to_original_file> \
   --extraction - <<'EOF'
 {"document_type": "lab_result", ...}
 EOF
@@ -193,9 +194,9 @@ For `lab_result`, `structured` must also contain an `indicators` array (one obje
 - Preserve original field values in their source language (ru/en).
 - For `range_status` in lab indicators: `normal`, `above`, `below`, or `null` if unknown.
 
-**If PDF has no readable text:**
-> "Couldn't extract text from `{filename}`. It may be corrupted, password-protected,
-> or a very low-resolution scan. Please try re-exporting or sending a clearer scan."
+**If no readable text or content could be extracted:**
+> "Couldn't extract content from `{filename}`. It may be corrupted, password-protected,
+> or a very low-resolution scan. Please try re-exporting or sending a clearer version."
 
 **If document type is `unknown` after extraction:**
 > "I extracted text from `{filename}` but couldn't identify the document type.
@@ -289,7 +290,7 @@ python scripts/delete_from_archive.py --base-path <BASE_PATH> --sha1 <SHA1>
    - `import_timestamp`
    - `document_type`
    - `brief_description`
-   - whether the original PDF and JSON extraction currently exist
+   - whether the original file and JSON extraction currently exist
 4. Ask for explicit confirmation.
 5. Only after the user confirms, run:
 
@@ -304,7 +305,7 @@ python scripts/delete_from_archive.py \
 ### What deletion must remove
 
 After confirmation, delete all archive data associated with that SHA-1:
-- `original_files/<SHA1>.pdf`
+- `original_files/<SHA1>.*` (original file, any extension)
 - `json_extractions/<SHA1>.json`
 - the row in `files`
 - all rows in typed tables where `file_sha1 = <SHA1>`
@@ -322,7 +323,7 @@ After confirmation, delete all archive data associated with that SHA-1:
 
 ```bash
 # In-session processing — no setup beyond BASE_PATH.
-# Attach a PDF in chat or give Claude a file path.
+# Attach a file in chat or give Claude a file path.
 
 # Query the database
 python scripts/query_db.py \
@@ -355,7 +356,7 @@ python scripts/delete_from_archive.py \
 ### `files` — every imported file
 | Column | Type | Notes |
 |--------|------|-------|
-| `sha1` | TEXT PK | SHA-1 of original PDF |
+| `sha1` | TEXT PK | SHA-1 of original file |
 | `original_filename` | TEXT | Filename as provided |
 | `import_timestamp` | TEXT | ISO 8601 |
 | `document_type` | TEXT | lab_result / doctor_visit / imaging_study / discharge_summary / prescription / vaccination / unknown |
@@ -434,7 +435,7 @@ Copy `.env.example` to `.env` and set `BASE_PATH` if desired. The scripts read `
 ## Error Handling
 
 - **Duplicate**: `{"status": "duplicate", "imported_on": "..."}` — no files modified.
-- **No text in PDF**: status `error`, message about corrupted/scanned file.
+- **No content extracted**: status `error`, message about corrupted/scanned file.
 - **errors.log**: one line per failure: `<timestamp> | <sha1> | <filename> | <error>`
 - **Unknown document type**: `document_type = "unknown"` in DB; ask user to clarify.
 
@@ -442,7 +443,7 @@ Copy `.env.example` to `.env` and set `BASE_PATH` if desired. The scripts read `
 
 | Error | Fix |
 |-------|-----|
-| `No text extracted` | Re-export PDF or scan at higher resolution |
+| `No text extracted` | Re-export or send a higher-resolution version |
 | `Database not found` | Run `python scripts/init_db.py --base-path <path>` |
 
 ---
@@ -477,7 +478,7 @@ git clone https://github.com/romahakov/personal-health-record \
 > store your medical files? (e.g. `/Users/roman/medical-archive`)"
 > Then proceed with hashing, deduplication, extraction, and saving.
 
-### User uploads a PDF without asking for analysis
+### User uploads a file without asking for analysis
 
 > "I see you've uploaded what looks like a medical document. Would you like me to
 > first check whether it's already in your archive, and then process and save only the files that are not already there through your Personal Health Record skill? It'll be saved to your archive

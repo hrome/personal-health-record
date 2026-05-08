@@ -8,13 +8,13 @@ document (PDF attached in chat, read from a local path, or loaded via MCP).
 Usage:
   python scripts/save_extraction.py \\
     --base-path ~/medical-archive \\
-    --pdf-path ~/Downloads/blood_test.pdf \\
+    --file-path ~/Downloads/blood_test.pdf \\
     --extraction '{"document_type": "lab_result", ...}'
 
   # or pass JSON via stdin to avoid shell quoting issues:
   python scripts/save_extraction.py \\
     --base-path ~/medical-archive \\
-    --pdf-path ~/Downloads/blood_test.pdf \\
+    --file-path ~/Downloads/blood_test.pdf \\
     --extraction - <<'EOF'
   {...}
   EOF
@@ -48,7 +48,7 @@ def sha1_of_file(path: str) -> str:
     return h.hexdigest()
 
 
-def db_check_duplicate(conn: sqlite3.Connection, sha1: str) -> dict | None:
+def db_check_duplicate(conn: sqlite3.Connection, sha1: str) -> "dict | None":
     row = conn.execute(
         "SELECT original_filename, import_timestamp FROM files WHERE sha1 = ?", (sha1,)
     ).fetchone()
@@ -184,7 +184,7 @@ DB_INSERTERS = {
 }
 
 
-def save_to_archive(pdf_path: str, base_path: str, extraction: dict,
+def save_to_archive(file_path: str, base_path: str, extraction: dict,
                     force: bool = False) -> dict:
     """
     Persist a completed extraction to the archive.
@@ -192,8 +192,8 @@ def save_to_archive(pdf_path: str, base_path: str, extraction: dict,
 
     Returns a result dict with status: ingested | duplicate | error.
     """
-    original_filename = os.path.basename(pdf_path)
-    sha1 = sha1_of_file(pdf_path)
+    original_filename = os.path.basename(file_path)
+    sha1 = sha1_of_file(file_path)
     db_path = os.path.join(base_path, "structured_database", "medical.db")
 
     with sqlite3.connect(db_path) as conn:
@@ -214,10 +214,11 @@ def save_to_archive(pdf_path: str, base_path: str, extraction: dict,
     meta = extraction.get("metadata") or {}
     structured = extraction.get("structured") or {}
 
-    # Copy original PDF
+    # Copy original file, preserving its extension
     orig_dir = os.path.join(base_path, "original_files")
     os.makedirs(orig_dir, exist_ok=True)
-    shutil.copy2(pdf_path, os.path.join(orig_dir, f"{sha1}.pdf"))
+    ext = os.path.splitext(file_path)[1] or ".pdf"
+    shutil.copy2(file_path, os.path.join(orig_dir, f"{sha1}{ext}"))
 
     # Save JSON extraction
     json_dir = os.path.join(base_path, "json_extractions")
@@ -251,8 +252,8 @@ def main():
         description="Save a JSON extraction to the medical archive."
     )
     parser.add_argument("--base-path", required=True, help="Root archive directory")
-    parser.add_argument("--pdf-path", required=True,
-                        help="Path to the original PDF file")
+    parser.add_argument("--file-path", dest="file_path", required=True,
+                        help="Path to the original file (PDF, JPG, PNG, etc.)")
     parser.add_argument("--extraction", required=True,
                         help="JSON extraction string, or '-' to read from stdin")
     parser.add_argument("--force", action="store_true",
@@ -270,14 +271,14 @@ def main():
         print(f"Invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not os.path.isfile(args.pdf_path):
-        print(f"PDF not found: {args.pdf_path}", file=sys.stderr)
+    if not os.path.isfile(args.file_path):
+        print(f"File not found: {args.file_path}", file=sys.stderr)
         sys.exit(1)
 
     init_db(args.base_path)
 
     try:
-        result = save_to_archive(args.pdf_path, args.base_path, extraction, force=args.force)
+        result = save_to_archive(args.file_path, args.base_path, extraction, force=args.force)
     except Exception as e:
         print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
         sys.exit(1)
