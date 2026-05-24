@@ -28,6 +28,7 @@ Analyzes the data on request — tracks lab trends, surfaces past diagnoses, and
 
 ```
 <BASE_PATH>/
+├── archive_owner.json       # Identity file — who this archive belongs to
 ├── original_files/          # Original files, named by SHA-1 hash (never modified)
 ├── json_extractions/        # Full structured JSON extraction per file
 └── structured_database/
@@ -37,6 +38,171 @@ Analyzes the data on request — tracks lab trends, surfaces past diagnoses, and
 
 Query order: **structured_database first** (fastest) → **json_extractions** if
 SQL is insufficient → **original_files** only when the user explicitly asks.
+
+### `archive_owner.json`
+
+The canonical identity file for the archive. Auto-created on the first ingest
+with a non-null `patient_full_name` — **the user is never asked to type their
+name**. Format:
+
+```json
+{
+  "schema_version": 1,
+  "created_at": "2026-05-24T10:30:00Z",
+  "updated_at": "2026-05-24T10:30:00Z",
+  "owner": {
+    "patient_full_name": "John Doe",
+    "patient_dob": "1990-01-15",
+    "aliases": ["Jonathan Doe", "Doe J."]
+  },
+  "archive": {
+    "display_name": null,
+    "notes": null
+  }
+}
+```
+
+Safe for the user to hand-edit: `owner.aliases`, `archive.display_name`,
+`archive.notes`, and `owner.patient_dob`. Do not touch `schema_version` or
+`created_at` by hand.
+
+---
+
+## Choosing Which Archive To Use
+
+The same machine may host **multiple archives — one per person** (yours, a parent's,
+a child's, …). Before any read or write, resolve which archive is active using this
+strict priority order:
+
+**Priority 1 — current working directory.**
+If the current working directory is itself the root of a medical archive, use it as
+`BASE_PATH`. A directory qualifies as an archive root when **either**:
+- it contains `archive_owner.json` (strongest signal), **or**
+- it contains all three of `original_files/`, `json_extractions/`, and
+  `structured_database/medical.db` (legacy archives without an owner file).
+
+Detect this before falling back to anything else.
+
+**Priority 2 — `.env` `BASE_PATH`.**
+If the current working directory is **not** an archive root, read `BASE_PATH` from the
+skill's `.env` file (or the inherited environment) and use that.
+
+**If neither is available**, run First-Run Onboarding to set one up.
+
+When you start working in a session, state which archive you resolved, how, and
+who it belongs to — read `archive_owner.json` and include the owner's name:
+
+> "Using archive at `/Users/.../medical-archive` (resolved from current working
+> directory) — owner **John Doe** (DOB 1990-01-15)."
+
+If the active archive has no `archive_owner.json` yet (a brand-new archive or a
+legacy one), say so explicitly and explain that the owner will be established
+from the first file that contains a patient name. This prevents accidentally
+writing one person's record into another person's archive.
+
+---
+
+## Archive Owner Identity
+
+**Each archive belongs to exactly one person.** A single archive must never mix
+records from different patients.
+
+The archive's owner is defined by `archive_owner.json` at the archive root
+(see Architecture). `save_extraction.py` resolves the active owner in this
+order:
+
+1. **`archive_owner.json` exists** → it is authoritative. The new file's
+   `metadata.patient_full_name` must match `owner.patient_full_name` or any
+   entry in `owner.aliases` (whitespace-normalized, case-insensitive).
+2. **File missing, DB has patient names** → legacy archive. Falls back to the
+   distinct `patient_full_name`s already stored in the typed tables.
+3. **File missing, DB empty** → no known owner; the next ingest with a
+   non-null patient name will establish it.
+
+### Auto-creation — never ask the user to type their name
+
+On the first ingest with a non-null `metadata.patient_full_name` into an
+archive that has no `archive_owner.json`, the script writes the owner file
+automatically using that name (and `patient_dob` if available). The result
+JSON will include `"owner_file_created": true` and an `"owner"` object.
+
+When you see `owner_file_created: true`, announce it to the user:
+
+> "Owner identified as **{patient_full_name}**{ (DOB {patient_dob}) if present}
+> — saved to `archive_owner.json`. You can hand-edit `aliases`, `display_name`,
+> or `notes` in that file anytime."
+
+If the first file's `patient_full_name` is null/empty, the file is saved but
+no owner file is created yet. Surface this to the user and tell them the next
+file with a patient name will establish the owner.
+
+### Validation before saving
+
+Before calling `save_extraction.py` for a new file, you must verify that the
+extracted `metadata.patient_full_name` is consistent with the active archive's
+owner. `save_extraction.py` performs the same check as a safety net and will
+refuse to ingest a file from a different patient — it returns
+`{"status": "patient_mismatch", "archive_patient_names": [...],
+"file_patient_name": "...", "owner_file_present": true|false}` and does **not**
+write anything to the archive.
+
+Matching is whitespace-normalized and case-insensitive, and the canonical name
+plus all `aliases` count as the same person. Null patient names in the new
+extraction do **not** trigger a hard mismatch at the script level (many
+documents simply do not print the patient name) — but **you must still confirm
+with the user before saving**.
+
+When the file's `metadata.patient_full_name` is null/empty and the archive already
+has a known owner, ask:
+
+> "I couldn't identify the patient from `{filename}`. The active archive at
+> `{BASE_PATH}` belongs to **{owner.patient_full_name}**. Should I save this
+> file as belonging to that person? (yes / no — different person / skip this file)"
+
+Only proceed with the save after the user confirms it belongs to the archive's
+owner. If they say it's a different person, follow the mismatch flow below
+(switch archive or skip). Do not silently attribute an unidentified document to
+the archive's owner.
+
+### When a mismatch occurs
+
+If validation (either yours or the script's) reports a mismatch, **stop the ingest
+for that file** and show the user:
+
+> "This file appears to belong to **{file_patient_name}**, but the active archive
+> at `{BASE_PATH}` belongs to **{archive_patient_names}**.
+> I won't save it here. Options:
+> A) Switch to a different archive for **{file_patient_name}** — give me its path,
+>    or `cd` into its folder and try again.
+> B) Skip this file.
+> C) If this really is the same person (e.g. a name spelled differently),
+>    confirm and I'll register **{file_patient_name}** as an alias for
+>    **{archive_patient_names[0]}** in `archive_owner.json` and retry the save."
+
+For option C, when `owner_file_present: true`, re-invoke `save_extraction.py`
+with `--add-alias "{file_patient_name}"`. The script appends the alias to
+`owner.aliases`, bumps `updated_at`, then re-runs the identity check and
+proceeds to save in the same call.
+
+For option C when `owner_file_present: false` (legacy archive with no owner
+file yet), explain that the owner file will be created from the next ingested
+file with a known name; until then, use `--allow-patient-mismatch` only after
+explicit user confirmation that the file belongs to the same person.
+
+Never bypass the check silently.
+
+### Migrating a legacy archive (no `archive_owner.json`)
+
+When you encounter an archive whose DB has records but no `archive_owner.json`,
+ask once per session:
+
+> "All existing records in `{BASE_PATH}` are under **{derived_name}**. Save this
+> as the archive owner (`archive_owner.json`)?"
+
+On confirmation, write the file by either ingesting a file with that
+`patient_full_name` (auto-creation kicks in) or by editing `archive_owner.json`
+directly to seed the canonical owner. On rejection, continue with DB-inference
+fallback and do not nag again this session.
 
 ---
 
@@ -56,7 +222,7 @@ On first use, greet the user with:
 > if you explicitly ask me to.
 >
 > Let's start — where should I store your medical archive?
-> Please give me a folder path, e.g. `/Users/roman/medical-archive`."
+> Please give me a folder path, e.g. `/Users/you/medical-archive`."
 
 After the user provides BASE_PATH, ask:
 
@@ -66,6 +232,11 @@ After the user provides BASE_PATH, ask:
 > C) Other source (Google Drive, email, clinic website via MCP)"
 
 Record BASE_PATH and the chosen method for the session.
+
+**Do not ask the user for their name, patronymic, or date of birth.** The
+archive's identity file (`archive_owner.json`) is created automatically from
+the first ingested file that contains a patient name. Tell the user this when
+they ask whose archive it is before any file is ingested.
 
 ---
 
@@ -120,9 +291,21 @@ Skip files that already exist.
 Apply the extraction schema below and produce a JSON object with the required structure
 for each new file.
 
-**Step 5 — Save newly extracted files to the archive immediately**
-After extraction, save each newly processed file to the archive in the same run.
-Do not pause for a separate confirmation step once the user has asked to process the files.
+**Step 5 — Verify patient identity, then save newly extracted files immediately**
+Before saving each file, confirm that its extracted `metadata.patient_full_name`
+matches the archive's owner (see **Archive Owner Identity**). If `save_extraction.py`
+returns `status: "patient_mismatch"`, surface the mismatch prompt to the user
+(option A switch / B skip / C add alias). Do not retry with
+`--allow-patient-mismatch` or `--add-alias` without explicit user confirmation in
+this conversation.
+
+After the identity check passes, save each newly processed file to the archive in
+the same run. Do not pause for a separate confirmation step once the user has asked
+to process the files.
+
+If the script's result includes `"owner_file_created": true`, surface the
+owner-identified announcement to the user (see **Auto-creation** under Archive
+Owner Identity) — this happens only on the first qualifying ingest per archive.
 
 Use:
 ```bash
@@ -426,15 +609,24 @@ python scripts/delete_from_archive.py \
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `BASE_PATH` | Optional | Default archive path (can also pass `--base-path` per command) |
+| `BASE_PATH` | Optional | Fallback archive path used when the current working directory is not itself an archive root. Can also be passed per command via `--base-path`. |
 
-Copy `.env.example` to `.env` and set `BASE_PATH` if desired. The scripts read `.env` automatically.
+Copy `.env.example` to `.env` and set `BASE_PATH` if desired.
+
+**Multiple archives.** You can keep several archives on the same machine (one per
+person). To work with a non-default archive, either `cd` into its root directory
+(see **Choosing Which Archive To Use**) or pass `--base-path` explicitly. The
+`.env` `BASE_PATH` is only used as a fallback when the working directory is not an
+archive root.
 
 ---
 
 ## Error Handling
 
 - **Duplicate**: `{"status": "duplicate", "imported_on": "..."}` — no files modified.
+- **Patient mismatch**: `{"status": "patient_mismatch", "archive_patient_names": [...], "file_patient_name": "...", "owner_file_present": true|false}` — no files modified. The file belongs to a different person than the active archive's owner. Surface the mismatch prompt from **Archive Owner Identity**; the preferred retry is `--add-alias` (when `owner_file_present: true` and the user confirms it's the same person), not `--allow-patient-mismatch`.
+- **No owner file when alias requested**: `{"status": "no_owner_file", ...}` — `--add-alias` was used against an archive with no `archive_owner.json` yet. Ingest a file with a known patient name first so the owner file can be auto-created.
+- **Owner file created**: a normal `status: "ingested"` result may additionally carry `"owner_file_created": true` and an `"owner"` object — surface the owner-identified announcement to the user (see Archive Owner Identity → Auto-creation).
 - **No content extracted**: status `error`, message about corrupted/scanned file.
 - **errors.log**: one line per failure: `<timestamp> | <sha1> | <filename> | <error>`
 - **Unknown document type**: `document_type = "unknown"` in DB; ask user to clarify.
@@ -475,7 +667,7 @@ git clone https://github.com/romahakov/personal-health-record \
 
 **If BASE_PATH is not set up yet:**
 > "You haven't set up an archive yet. It only takes a second — where should I
-> store your medical files? (e.g. `/Users/roman/medical-archive`)"
+> store your medical files? (e.g. `/Users/you/medical-archive`)"
 > Then proceed with hashing, deduplication, extraction, and saving.
 
 ### User uploads a file without asking for analysis

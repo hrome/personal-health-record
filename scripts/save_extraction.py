@@ -31,6 +31,14 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 from init_db import init_db
+from owner_file import (
+    add_alias as owner_add_alias,
+    canonical_name_list,
+    canonical_name_set,
+    normalize_patient_name,
+    read_owner_file,
+    write_owner_file,
+)
 
 
 def _sv(v):
@@ -53,6 +61,78 @@ def db_check_duplicate(conn: sqlite3.Connection, sha1: str) -> "dict | None":
         "SELECT original_filename, import_timestamp FROM files WHERE sha1 = ?", (sha1,)
     ).fetchone()
     return dict(row) if row else None
+
+
+_PATIENT_TABLES = (
+    "lab_events",
+    "doctor_visits",
+    "imaging_studies",
+    "discharge_summaries",
+    "prescriptions",
+    "vaccinations",
+)
+
+
+def db_known_patient_names(conn: sqlite3.Connection) -> "list[str]":
+    """Distinct non-null patient_full_name values across all typed tables."""
+    seen: dict = {}
+    for table in _PATIENT_TABLES:
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT patient_full_name FROM {table} "
+                f"WHERE patient_full_name IS NOT NULL AND patient_full_name <> ''"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for row in rows:
+            raw = row[0]
+            norm = normalize_patient_name(raw)
+            if norm and norm not in seen:
+                seen[norm] = raw
+    return list(seen.values())
+
+
+def check_patient_identity(conn: sqlite3.Connection,
+                           base_path: str,
+                           file_patient_name: "str | None") -> "dict | None":
+    """
+    Return a mismatch result dict if the file's patient does not match the
+    archive's known owner, otherwise None.
+
+    Resolution order:
+      1. archive_owner.json — authoritative when present.
+      2. Distinct patient_full_name values across typed tables (legacy
+         archives without an owner file).
+      3. No known owner — pass through.
+
+    A null/empty file patient name is allowed through here; SKILL.md requires
+    Claude to confirm with the user at the conversation layer in that case.
+    """
+    norm_new = normalize_patient_name(file_patient_name)
+    if norm_new is None:
+        return None
+
+    owner = read_owner_file(base_path)
+    if owner is not None:
+        if norm_new in canonical_name_set(owner):
+            return None
+        return {
+            "archive_patient_names": canonical_name_list(owner),
+            "file_patient_name": file_patient_name,
+            "owner_file_present": True,
+        }
+
+    known = db_known_patient_names(conn)
+    if not known:
+        return None
+    norm_known = {normalize_patient_name(n) for n in known}
+    if norm_new in norm_known:
+        return None
+    return {
+        "archive_patient_names": known,
+        "file_patient_name": file_patient_name,
+        "owner_file_present": False,
+    }
 
 
 def db_insert_file(conn: sqlite3.Connection, sha1: str, original_filename: str,
@@ -185,34 +265,63 @@ DB_INSERTERS = {
 
 
 def save_to_archive(file_path: str, base_path: str, extraction: dict,
-                    force: bool = False) -> dict:
+                    force: bool = False,
+                    allow_patient_mismatch: bool = False,
+                    add_alias_first: "str | None" = None) -> dict:
     """
     Persist a completed extraction to the archive.
     Called by Claude in-session after extracting structured data from a document.
 
-    Returns a result dict with status: ingested | duplicate | error.
+    Returns a result dict with status:
+      ingested | duplicate | patient_mismatch | no_owner_file | error.
     """
     original_filename = os.path.basename(file_path)
     sha1 = sha1_of_file(file_path)
     db_path = os.path.join(base_path, "structured_database", "medical.db")
-
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        existing = db_check_duplicate(conn, sha1)
-
-    if existing and not force:
-        return {
-            "sha1": sha1,
-            "status": "duplicate",
-            "original_filename": original_filename,
-            "imported_on": existing["import_timestamp"],
-        }
 
     doc_type = extraction.get("document_type", "unknown")
     brief = extraction.get("brief_description", "")
     language = extraction.get("language", "unknown")
     meta = extraction.get("metadata") or {}
     structured = extraction.get("structured") or {}
+
+    if add_alias_first:
+        updated = owner_add_alias(base_path, add_alias_first)
+        if updated is None:
+            return {
+                "sha1": sha1,
+                "status": "no_owner_file",
+                "original_filename": original_filename,
+                "base_path": base_path,
+                "error": (
+                    "Cannot add an alias: archive_owner.json does not exist yet "
+                    "for this archive. Ingest a file with a known patient name "
+                    "first so the owner file can be auto-created."
+                ),
+            }
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = db_check_duplicate(conn, sha1)
+        if existing and not force:
+            return {
+                "sha1": sha1,
+                "status": "duplicate",
+                "original_filename": original_filename,
+                "imported_on": existing["import_timestamp"],
+            }
+        if not allow_patient_mismatch:
+            mismatch = check_patient_identity(
+                conn, base_path, meta.get("patient_full_name")
+            )
+            if mismatch is not None:
+                return {
+                    "sha1": sha1,
+                    "status": "patient_mismatch",
+                    "original_filename": original_filename,
+                    "base_path": base_path,
+                    **mismatch,
+                }
 
     # Copy original file, preserving its extension
     orig_dir = os.path.join(base_path, "original_files")
@@ -244,6 +353,19 @@ def save_to_archive(file_path: str, base_path: str, extraction: dict,
     }
     if doc_type == "lab_result":
         result["indicators_count"] = len(structured.get("indicators") or [])
+
+    # Auto-create archive_owner.json on the first ingest with a non-null
+    # patient name. The user is never asked to type their name.
+    patient_name = meta.get("patient_full_name")
+    if patient_name and read_owner_file(base_path) is None:
+        owner = write_owner_file(
+            base_path,
+            patient_full_name=patient_name,
+            patient_dob=meta.get("patient_dob"),
+        )
+        result["owner_file_created"] = True
+        result["owner"] = owner["owner"]
+
     return result
 
 
@@ -258,6 +380,16 @@ def main():
                         help="JSON extraction string, or '-' to read from stdin")
     parser.add_argument("--force", action="store_true",
                         help="Overwrite even if SHA-1 already in database")
+    parser.add_argument("--allow-patient-mismatch", action="store_true",
+                        dest="allow_patient_mismatch",
+                        help="Skip the patient-identity check. Only use after explicit "
+                             "user confirmation that this file belongs to the same person "
+                             "as the rest of the archive (e.g. a name spelled differently).")
+    parser.add_argument("--add-alias", dest="add_alias", default=None,
+                        help="Append this name to archive_owner.json owner.aliases before "
+                             "the identity check (so a same-person-different-spelling file "
+                             "can be ingested without --allow-patient-mismatch). Requires "
+                             "archive_owner.json to already exist.")
     args = parser.parse_args()
 
     if args.extraction == "-":
@@ -278,7 +410,10 @@ def main():
     init_db(args.base_path)
 
     try:
-        result = save_to_archive(args.file_path, args.base_path, extraction, force=args.force)
+        result = save_to_archive(args.file_path, args.base_path, extraction,
+                                 force=args.force,
+                                 allow_patient_mismatch=args.allow_patient_mismatch,
+                                 add_alias_first=args.add_alias)
     except Exception as e:
         print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
         sys.exit(1)
