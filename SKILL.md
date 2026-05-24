@@ -24,6 +24,44 @@ compatibility:
 Reads medical documents, extracts relevant information, and keeps everything in a local 3-layer archive.
 Analyzes the data on request — tracks lab trends, surfaces past diagnoses, and answers questions about health history.
 
+## Reading PDFs
+
+> **Do not install `poppler`. Do not use `pypdf` (or any other PDF library).
+> Read PDFs directly through the `Read` tool.**
+
+This skill has **no PDF-related system dependencies**. PDF reading goes
+through Claude Code's native `Read` tool, which (when called without local
+preprocessing) wraps the file in an Anthropic API `document` block and ships
+it to the API — the model unpacks both text and rendered page images on the
+server side. Nothing is rendered or parsed on the user's machine.
+
+**Rules — apply on every PDF, every session:**
+
+- **Call `Read(file_path)` directly on the `.pdf`. Do not use the `pages:`
+  parameter.** Specifying `pages:` triggers local page extraction and
+  requires `pdftoppm` / `poppler` — that is the wrong path for this skill.
+- **Do not pre-render PDFs to PNG/JPG with `pdftoppm`, `poppler`,
+  ImageMagick, or anything else.** Pass the original `.pdf` straight to
+  `Read`.
+- **Do not parse PDFs with `pdfplumber`, `pypdf`, `pdfminer`, or any other
+  text-only library** — they mangle medical tables and miss scanned content.
+- **Do not run diagnostic checks like `which pdftoppm`, `brew list poppler`,
+  `apt list ...`** — they imply the wrong dependency story to the user.
+- **Do not suggest `brew install poppler`** in error messages.
+
+API limits per PDF: ~32 MB and ~100 pages. If a file exceeds either limit
+(or `Read` fails for any other reason — password-protected, corrupted,
+unsupported encoding), surface the error verbatim and ask the user to:
+- compress the PDF (e.g. macOS Preview → Export → Reduce File Size),
+- split it into smaller PDFs (e.g. Preview → drag pages into a new doc), or
+- re-export an unlocked / clean copy.
+
+Then re-ingest the resulting files. The skill does not provide local
+splitting/compression — that is the user's responsibility.
+
+Images (`.jpg`, `.png`, `.heic`, …) are handled by `Read` the same way: pass
+the file path directly, no preprocessing.
+
 ## Architecture
 
 ```
@@ -284,8 +322,13 @@ If a matching file exists, do not extract it again unless the user explicitly as
 re-process it with `--force`.
 
 **Step 3 — Read only the files that are not yet archived**
-Use the `Read` tool on each file path that is not already present in the archive.
-Skip files that already exist.
+Use the native `Read` tool on each file path that is not already present in
+the archive. Skip files that already exist. For PDFs, call `Read(file_path)`
+directly — **do not use the `pages:` parameter**, do not pre-render pages
+locally, do not parse with text-only libraries (see **Reading PDFs**). If
+`Read` fails on a PDF, surface the error to the user and ask them to
+compress / split / unlock the file externally; do not propose installing
+poppler.
 
 **Step 4 — Extract structured data (Claude does this inline)**
 Apply the extraction schema below and produce a JSON object with the required structure
