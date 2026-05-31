@@ -24,6 +24,20 @@ compatibility:
 Reads medical documents, extracts relevant information, and keeps everything in a local 3-layer archive.
 Analyzes the data on request — tracks lab trends, surfaces past diagnoses, and answers questions about health history.
 
+## Running Scripts
+
+> **All scripts referenced in this document live in the `scripts/` directory of
+> this skill — i.e. the `scripts/` folder next to this `SKILL.md` file.** Always
+> invoke them from that skill directory, never relative to the current working
+> directory.
+>
+> When working with an archive, the current working directory is usually the
+> archive folder (`BASE_PATH`), not the skill folder. A bare `python
+> scripts/<name>.py` will therefore fail with "No such file or directory".
+> Instead, resolve the script's absolute path inside the skill directory before
+> running it — e.g. `python /path/to/skill/scripts/check_db_duplicates.py ...`,
+> where `/path/to/skill` is the directory containing this `SKILL.md`.
+
 ## Reading PDFs
 
 > **Do not install `poppler`. Do not use `pypdf` (or any other PDF library).
