@@ -135,6 +135,12 @@ If the current working directory is itself the root of a medical archive, use it
 
 Detect this before falling back to anything else.
 
+> **Sequential resolution — never parallelize.** Check Priority 1 first and
+> wait for its result. Only if the current directory is **not** an archive root
+> should you proceed to Priority 2. Do **not** issue a Priority-2 command
+> (reading `.env`) at the same time as the Priority-1 check (`ls` / directory
+> listing) — the priorities are strict and conditional, not parallel hints.
+
 **Priority 2 — `.env` `BASE_PATH`.**
 If the current working directory is **not** an archive root, read `BASE_PATH` from the
 skill's `.env` file (or the inherited environment) and use that.
