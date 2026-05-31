@@ -5,17 +5,15 @@ Save a completed JSON extraction to the archive.
 Called by Claude in-session after extracting structured data from a medical
 document (PDF attached in chat, read from a local path, or loaded via MCP).
 
-Usage:
+Usage (preferred — pass the JSON via a file to avoid shell quoting/brace issues):
   python scripts/save_extraction.py \\
     --base-path ~/medical-archive \\
     --file-path ~/Downloads/blood_test.pdf \\
-    --extraction '{"document_type": "lab_result", ...}'
+    --extraction-file ~/medical-archive/.phr_tmp/<sha1>.json
 
-  # or pass JSON via stdin to avoid shell quoting issues:
-  python scripts/save_extraction.py \\
-    --base-path ~/medical-archive \\
-    --file-path ~/Downloads/blood_test.pdf \\
-    --extraction - <<'EOF'
+  # also accepted: inline string or stdin
+  python scripts/save_extraction.py ... --extraction '{"document_type": "lab_result", ...}'
+  python scripts/save_extraction.py ... --extraction - <<'EOF'
   {...}
   EOF
 """
@@ -376,8 +374,12 @@ def main():
     parser.add_argument("--base-path", required=True, help="Root archive directory")
     parser.add_argument("--file-path", dest="file_path", required=True,
                         help="Path to the original file (PDF, JPG, PNG, etc.)")
-    parser.add_argument("--extraction", required=True,
+    parser.add_argument("--extraction", default=None,
                         help="JSON extraction string, or '-' to read from stdin")
+    parser.add_argument("--extraction-file", dest="extraction_file", default=None,
+                        help="Path to a file containing the JSON extraction. Preferred over "
+                             "--extraction: keeps the JSON out of the shell command (no quoting "
+                             "or brace-expansion issues).")
     parser.add_argument("--force", action="store_true",
                         help="Overwrite even if SHA-1 already in database")
     parser.add_argument("--allow-patient-mismatch", action="store_true",
@@ -392,10 +394,15 @@ def main():
                              "archive_owner.json to already exist.")
     args = parser.parse_args()
 
-    if args.extraction == "-":
+    if args.extraction_file is not None:
+        with open(args.extraction_file, encoding="utf-8") as fh:
+            raw = fh.read()
+    elif args.extraction == "-":
         raw = sys.stdin.read()
-    else:
+    elif args.extraction is not None:
         raw = args.extraction
+    else:
+        parser.error("provide --extraction-file, --extraction, or --extraction -")
 
     try:
         extraction = json.loads(raw)

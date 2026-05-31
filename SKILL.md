@@ -321,14 +321,30 @@ Documents can reach the agent in multiple ways — attached in chat, read from a
 path on disk, or loaded from a cloud service or MCP server. The ingestion pipeline is
 the same regardless of source.
 
-**Step 1 — Hash all files first for Deduplication**
-Before reading or extracting anything, compute the SHA-1 for every file in the batch
-and check whether each hash already exists in the `original_files` folder
-(search for `{sha1}.*` — the extension varies by file type).
-This check is cheap and must always happen first.
+**Step 1 — Hash all files and check the archive (Deduplication)**
+Before reading or extracting anything, run `check_archive_duplicates.py` over the whole batch.
+For every file it computes the SHA-1 and looks for `{sha1}.*` in `original_files/`
+(the extension varies by file type), emitting one JSON object per file:
+
+```bash
+python /path/to/skill/scripts/check_archive_duplicates.py \
+  --base-path <BASE_PATH> \
+  <file1> [file2 ...]
+```
+
+Each line reports `original_filename`, `path`, `sha1`, and `status`:
+- `present` — `{sha1}.*` exists in `original_files/`; the file is already archived
+  (also includes `archived_file`).
+- `absent` — not in `original_files/`; the file is new and will be processed.
+- `error` — the path is missing, unreadable, or a directory (includes `reason`); surface
+  it to the user and skip that file.
+
+Do not compute SHA-1s inline — always use this script so the hash matches the name the file
+would receive in `original_files/`.
 
 **Step 2 — Tell the user which files are already archived and which are new**
-Before any extraction starts, report the deduplication result for every file.
+Before any extraction starts, report the deduplication result for every file, using the
+per-file JSON from Step 1.
 This per-file status output is mandatory for every upload batch, regardless of how many
 files were provided and regardless of whether files are duplicates, newly saved, failed, or mixed.
 For each file, show at minimum:
@@ -354,7 +370,44 @@ poppler.
 Apply the extraction schema below and produce a JSON object with the required structure
 for each new file.
 
-**Step 5 — Verify patient identity, then save newly extracted files immediately**
+**Always pass the extraction as a file — never as a heredoc or an inline JSON string.**
+Both `check_db_duplicates.py` and `save_extraction.py` accept `--extraction-file <path>`.
+Heredocs and inline `--extraction '{...}'` strings put raw JSON (with `{"`…) into the
+shell command, which trips the harness's brace-expansion safety heuristic and forces a
+manual approval on every call. Writing the JSON to a file first avoids this entirely.
+
+Write the extraction with the `Write` tool to **`<BASE_PATH>/.phr_tmp/<sha1>.json`**
+(use the SHA-1 from Step 1; create the `.phr_tmp/` directory if needed). Keeping the
+temp file **inside `BASE_PATH`** matters: `BASE_PATH` is an allowed working directory,
+so the write is not blocked as "outside allowed working directories", and the bundled
+permission rule (`Write(/Users/.../medical-archive/*/.phr_tmp/**)`) lets it run without a
+prompt. The same `.phr_tmp/<sha1>.json` file is reused for both the duplicate check and
+the save, then overwritten on any later re-ingest of the same file. It holds only PHI
+already destined for `json_extractions/`, so it stays within the archive's security
+boundary. Delete it once the file has been saved successfully (see Step 6).
+
+**Step 5 — Database duplicate check (hash → date → content) — runs for every file that are not yet archived**
+The filesystem check in Step 1 only catches byte-identical re-uploads. A second photo or re-scan of the same paper document has a different SHA-1 and would otherwise create a duplicate record. Before calling `save_extraction.py` for any file (PDF, image, anything), run the sequential check, passing the file and the extraction-file written above:
+
+```bash
+python scripts/check_db_duplicates.py \
+  --base-path <BASE_PATH> \
+  --file-path <path_to_original_file> \
+  --extraction-file <BASE_PATH>/.phr_tmp/<sha1>.json
+```
+
+The script hashes the file (hash check), then looks for a same-type document on the same date (date check), then loads each same-date candidate's stored JSON and compares its `structured` content (content check). Handle the returned status:
+
+- `exact_duplicate` — this exact file is already in the database (matched by hash). Skip it: do not call `save_extraction.py`. Report it to the user with its existing `import_timestamp`. Highlight that it was not found in `original_files/`
+- `content_duplicate` — a same-date candidate whose extracted content is identical (`candidate.comparison.verdict: "identical"`). Show the candidate (`original_filename`, `import_timestamp`, `brief_description`) and the matched fields, recommend skipping as a duplicate, but confirm with the user before skipping. Only proceed to Step 6 if they say it is a different document.
+- `possible_duplicate` — a same-date candidate exists but the content differs (`verdict: "different"` / `"unknown"`). Show each candidate (`original_filename`, `import_timestamp`, `brief_description`, identifying fields like `laboratory_name` / `clinic_name` / `study_type`, and `comparison.differing_fields`) and ask:
+  > "I already have a `{document_type}` dated `{document_date}` in the archive: `{candidate.original_filename}` ({candidate.brief_description}). Is this the same document, or a different one from the same day?"
+
+  Only proceed to Step 6 after the user confirms it is a different document. If they confirm it is the same, skip the file (do not call `save_extraction.py`).
+- `skipped` (no `document_date` was extracted) — proceed to Step 6, but mention to the user that the date-based duplicate check could not run for this file.
+- `no_match` — proceed to Step 6 normally.
+
+**Step 6 — Verify patient identity, then save newly extracted files immediately**
 Before saving each file, confirm that its extracted `metadata.patient_full_name`
 matches the archive's owner (see **Archive Owner Identity**). If `save_extraction.py`
 returns `status: "patient_mismatch"`, surface the mismatch prompt to the user
@@ -370,17 +423,21 @@ If the script's result includes `"owner_file_created": true`, surface the
 owner-identified announcement to the user (see **Auto-creation** under Archive
 Owner Identity) — this happens only on the first qualifying ingest per archive.
 
-Use:
+Use the same extraction-file written in Step 5:
 ```bash
 python scripts/save_extraction.py \
   --base-path <BASE_PATH> \
   --file-path <path_to_original_file> \
-  --extraction - <<'EOF'
-{"document_type": "lab_result", ...}
-EOF
+  --extraction-file <BASE_PATH>/.phr_tmp/<sha1>.json
 ```
 
-**Step 6 — Show a user-facing detailed result**
+After `save_extraction.py` returns `status: "ingested"` for a file, delete its
+temp extraction at `<BASE_PATH>/.phr_tmp/<sha1>.json` — the canonical copy now
+lives in `json_extractions/`, so the temp file is no longer needed. Do not
+delete the temp file for any file that was skipped or failed to save. When a
+batch is fully processed, the `.phr_tmp/` directory should be left empty.
+
+**Step 7 — Show a user-facing detailed result**
 After deduplication, extraction, and saving, show a detailed result covering every file,
 including files that were skipped as duplicates and files that were newly saved.
 This final report is mandatory for every file in the batch, regardless of status and
@@ -687,6 +744,10 @@ archive root.
 ## Error Handling
 
 - **Duplicate**: `{"status": "duplicate", "imported_on": "..."}` — no files modified.
+- **Duplicate checks** (from `check_db_duplicates.py`, Step 5): the script returns one status from the sequential hash → date → content check.
+  - `exact_duplicate` — the exact file is already in the DB (matched by hash). Skip it; report the existing `import_timestamp`.
+  - `content_duplicate` — `{"candidates": [...]}` where a same-date candidate's `comparison.verdict` is `identical`. Near-certain re-scan; recommend skipping but confirm with the user.
+  - `possible_duplicate` — `{"candidates": [...]}` — another document of the same `document_type` is archived for the same `document_date` but the content differs. Surface the candidates (and `comparison.differing_fields`) and only save after the user confirms it is a different document.
 - **Patient mismatch**: `{"status": "patient_mismatch", "archive_patient_names": [...], "file_patient_name": "...", "owner_file_present": true|false}` — no files modified. The file belongs to a different person than the active archive's owner. Surface the mismatch prompt from **Archive Owner Identity**; the preferred retry is `--add-alias` (when `owner_file_present: true` and the user confirms it's the same person), not `--allow-patient-mismatch`.
 - **No owner file when alias requested**: `{"status": "no_owner_file", ...}` — `--add-alias` was used against an archive with no `archive_owner.json` yet. Ingest a file with a known patient name first so the owner file can be auto-created.
 - **Owner file created**: a normal `status: "ingested"` result may additionally carry `"owner_file_created": true` and an `"owner"` object — surface the owner-identified announcement to the user (see Archive Owner Identity → Auto-creation).
