@@ -378,9 +378,19 @@ For each file, show at minimum:
 If a matching file exists, do not extract it again unless the user explicitly asks to
 re-process it with `--force`.
 
-**Step 3 — Read only the files that are not yet archived**
-Use the native `Read` tool on each file path that is not already present in
-the archive. Skip files that already exist. For PDFs, call `Read(file_path)`
+**Steps 3–6 run per file, one file at a time.** Steps 1–2 are batch operations
+over the whole upload (hash + dedup report). After that, process the *not-yet-archived*
+files **sequentially**: take the first new file and run Steps 3 → 4 → 5 → 6 to
+completion (read → extract → DB duplicate check → verify identity and save) before
+starting on the next file. Do **not** read or extract the whole batch up front and
+save at the end — fully finish each file before moving to the next. Step 7 (the
+final report) runs once at the end, after every file has been through the loop.
+
+The steps below are written for a single file; repeat them for each new file in turn.
+
+**Step 3 — Read the file (skip if already archived)**
+Use the native `Read` tool on the current file's path. Skip the file entirely if it
+is already present in the archive. For PDFs, call `Read(file_path)`
 directly — **do not use the `pages:` parameter**, do not pre-render pages
 locally, do not parse with text-only libraries (see **Reading PDFs**). If
 `Read` fails on a PDF, surface the error to the user and ask them to
@@ -389,7 +399,7 @@ poppler.
 
 **Step 4 — Extract structured data (Claude does this inline)**
 Apply the extraction schema below and produce a JSON object with the required structure
-for each new file.
+for this file.
 
 **Always pass the extraction as a file — never as a heredoc or an inline JSON string.**
 Both `check_db_duplicates.py` and `save_extraction.py` accept `--extraction-file <path>`.
@@ -407,8 +417,8 @@ the save, then overwritten on any later re-ingest of the same file. It holds onl
 already destined for `json_extractions/`, so it stays within the archive's security
 boundary. Delete it once the file has been saved successfully (see Step 6).
 
-**Step 5 — Database duplicate check (hash → date → content) — runs for every file that are not yet archived**
-The filesystem check in Step 1 only catches byte-identical re-uploads. A second photo or re-scan of the same paper document has a different SHA-1 and would otherwise create a duplicate record. Before calling `save_extraction.py` for any file (PDF, image, anything), run the sequential check, passing the file and the extraction-file written above:
+**Step 5 — Database duplicate check (hash → date → content)**
+The filesystem check in Step 1 only catches byte-identical re-uploads. A second photo or re-scan of the same paper document has a different SHA-1 and would otherwise create a duplicate record. Before calling `save_extraction.py` for this file (PDF, image, anything), run the sequential check, passing the file and the extraction-file written above:
 
 ```bash
 python scripts/check_db_duplicates.py \
@@ -428,17 +438,17 @@ The script hashes the file (hash check), then looks for a same-type document on 
 - `skipped` (no `document_date` was extracted) — proceed to Step 6, but mention to the user that the date-based duplicate check could not run for this file.
 - `no_match` — proceed to Step 6 normally.
 
-**Step 6 — Verify patient identity, then save newly extracted files immediately**
-Before saving each file, confirm that its extracted `metadata.patient_full_name`
+**Step 6 — Verify patient identity, then save this file immediately**
+Before saving the file, confirm that its extracted `metadata.patient_full_name`
 matches the archive's owner (see **Archive Owner Identity**). If `save_extraction.py`
 returns `status: "patient_mismatch"`, surface the mismatch prompt to the user
 (option A switch / B skip / C add alias). Do not retry with
 `--allow-patient-mismatch` or `--add-alias` without explicit user confirmation in
 this conversation.
 
-After the identity check passes, save each newly processed file to the archive in
-the same run. Do not pause for a separate confirmation step once the user has asked
-to process the files.
+After the identity check passes, save this file to the archive in the same run. Do
+not pause for a separate confirmation step once the user has asked to process the
+files. Once this file is saved, return to Step 3 for the next new file.
 
 If the script's result includes `"owner_file_created": true`, surface the
 owner-identified announcement to the user (see **Auto-creation** under Archive
