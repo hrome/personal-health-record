@@ -105,7 +105,8 @@ name**. Format:
   "owner": {
     "patient_full_name": "John Doe",
     "patient_dob": "1990-01-15",
-    "aliases": ["Jonathan Doe", "Doe J."]
+    "aliases": ["Jonathan Doe", "Doe J."],
+    "policy_numbers": ["1234567890123456"]
   },
   "archive": {
     "display_name": null,
@@ -114,9 +115,14 @@ name**. Format:
 }
 ```
 
-Safe for the user to hand-edit: `owner.aliases`, `archive.display_name`,
-`archive.notes`, and `owner.patient_dob`. Do not touch `schema_version` or
-`created_at` by hand.
+`owner.policy_numbers` holds the patient's insurance policy number(s) (e.g. an
+OMS policy). They are accumulated automatically from ingested files and are
+used to verify identity when a document carries a policy number but no patient
+name (see Archive Owner Identity).
+
+Safe for the user to hand-edit: `owner.aliases`, `owner.policy_numbers`,
+`archive.display_name`, `archive.notes`, and `owner.patient_dob`. Do not touch
+`schema_version` or `created_at` by hand.
 
 ---
 
@@ -171,11 +177,20 @@ order:
 
 1. **`archive_owner.json` exists** → it is authoritative. The new file's
    `metadata.patient_full_name` must match `owner.patient_full_name` or any
-   entry in `owner.aliases` (whitespace-normalized, case-insensitive).
+   entry in `owner.aliases` (whitespace-normalized, case-insensitive). When the
+   file has **no patient name but does carry a `metadata.policy_number`**, and
+   the owner card has recorded `policy_numbers`, identity is instead verified by
+   the policy number (digits-only comparison): a matching policy passes silently,
+   a non-matching policy is a `patient_mismatch`.
 2. **File missing, DB has patient names** → legacy archive. Falls back to the
    distinct `patient_full_name`s already stored in the typed tables.
 3. **File missing, DB empty** → no known owner; the next ingest with a
    non-null patient name will establish it.
+
+Policy numbers are accumulated automatically: whenever a file that matches the
+owner carries a `metadata.policy_number` not yet on the card, the script appends
+it to `owner.policy_numbers` (and seeds it on first auto-creation). This lets a
+later document that prints only a policy number — no name — still be verified.
 
 ### Auto-creation — never ask the user to type their name
 
@@ -210,8 +225,14 @@ extraction do **not** trigger a hard mismatch at the script level (many
 documents simply do not print the patient name) — but **you must still confirm
 with the user before saving**.
 
-When the file's `metadata.patient_full_name` is null/empty and the archive already
-has a known owner, ask:
+When the file's `metadata.patient_full_name` is null/empty but it carries a
+`metadata.policy_number` that **matches** the owner card's `policy_numbers`,
+identity is confirmed by the policy number — save without asking. If the policy
+number does **not** match, `save_extraction.py` returns `patient_mismatch`
+(`match_basis: "policy_number"`); follow the mismatch flow below.
+
+When the file's `metadata.patient_full_name` is null/empty and there is no
+matchable policy number, and the archive already has a known owner, ask:
 
 > "I couldn't identify the patient from `{filename}`. The active archive at
 > `{BASE_PATH}` belongs to **{owner.patient_full_name}**. Should I save this
@@ -481,6 +502,7 @@ Claude must produce a JSON object with this top-level structure:
   "metadata": {
     "patient_full_name": null,
     "patient_dob": null,
+    "policy_number": null,
     "clinic_or_lab_name": null,
     "doctor_full_name": null,
     "document_date": null

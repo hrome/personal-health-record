@@ -27,6 +27,14 @@ def normalize_patient_name(name):
     return s or None
 
 
+def normalize_policy_number(policy):
+    """Normalize an insurance policy number for comparison: digits only."""
+    if policy is None:
+        return None
+    s = re.sub(r"\D", "", str(policy))
+    return s or None
+
+
 def _now_iso() -> str:
     return (
         datetime.now(timezone.utc)
@@ -76,7 +84,7 @@ def read_owner_file(base_path: str):
 
 
 def write_owner_file(base_path: str, *, patient_full_name: str,
-                     patient_dob=None, aliases=None,
+                     patient_dob=None, aliases=None, policy_numbers=None,
                      display_name=None, notes=None) -> dict:
     """Atomically (re)write the archive_owner.json file."""
     now = _now_iso()
@@ -88,6 +96,7 @@ def write_owner_file(base_path: str, *, patient_full_name: str,
             "patient_full_name": patient_full_name,
             "patient_dob": patient_dob,
             "aliases": list(aliases or []),
+            "policy_numbers": list(policy_numbers or []),
         },
         "archive": {
             "display_name": display_name,
@@ -122,6 +131,39 @@ def add_alias(base_path: str, new_alias: str) -> "dict | None":
         data["updated_at"] = _now_iso()
         _atomic_write_json(owner_file_path(base_path), data)
     return data
+
+
+def add_policy_number(base_path: str, new_policy: str) -> "dict | None":
+    """Append `new_policy` to owner.policy_numbers if not already present.
+
+    Returns the updated owner dict, or None if no owner file exists.
+    Raises ValueError if `new_policy` has no digits.
+    """
+    data = read_owner_file(base_path)
+    if data is None:
+        return None
+    norm_new = normalize_policy_number(new_policy)
+    if norm_new is None:
+        raise ValueError("Policy number must contain at least one digit")
+    owner = data["owner"]
+    policies = list(owner.get("policy_numbers") or [])
+    known = {normalize_policy_number(p) for p in policies}
+    if norm_new not in known:
+        policies.append(new_policy)
+        owner["policy_numbers"] = policies
+        data["updated_at"] = _now_iso()
+        _atomic_write_json(owner_file_path(base_path), data)
+    return data
+
+
+def policy_number_set(owner_dict: dict) -> set:
+    """Normalized set of owner.policy_numbers used for matching."""
+    owner = owner_dict.get("owner") or {}
+    return {
+        p for p in (
+            normalize_policy_number(x) for x in (owner.get("policy_numbers") or [])
+        ) if p
+    }
 
 
 def canonical_name_set(owner_dict: dict) -> set:

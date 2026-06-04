@@ -31,9 +31,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from init_db import init_db
 from owner_file import (
     add_alias as owner_add_alias,
+    add_policy_number as owner_add_policy_number,
     canonical_name_list,
     canonical_name_set,
     normalize_patient_name,
+    normalize_policy_number,
+    policy_number_set,
     read_owner_file,
     write_owner_file,
 )
@@ -92,7 +95,8 @@ def db_known_patient_names(conn: sqlite3.Connection) -> "list[str]":
 
 def check_patient_identity(conn: sqlite3.Connection,
                            base_path: str,
-                           file_patient_name: "str | None") -> "dict | None":
+                           file_patient_name: "str | None",
+                           file_policy_number: "str | None" = None) -> "dict | None":
     """
     Return a mismatch result dict if the file's patient does not match the
     archive's known owner, otherwise None.
@@ -103,23 +107,47 @@ def check_patient_identity(conn: sqlite3.Connection,
          archives without an owner file).
       3. No known owner — pass through.
 
-    A null/empty file patient name is allowed through here; SKILL.md requires
-    Claude to confirm with the user at the conversation layer in that case.
+    When the file has no patient name but does carry an insurance policy number,
+    and the owner file has recorded policy numbers, identity is verified by the
+    policy number instead: a matching policy passes, a non-matching policy is a
+    mismatch.
+
+    A null/empty file patient name with no verifiable policy is allowed through
+    here; SKILL.md requires Claude to confirm with the user at the conversation
+    layer in that case.
     """
     norm_new = normalize_patient_name(file_patient_name)
-    if norm_new is None:
-        return None
+    norm_policy = normalize_policy_number(file_policy_number)
 
     owner = read_owner_file(base_path)
     if owner is not None:
-        if norm_new in canonical_name_set(owner):
-            return None
-        return {
-            "archive_patient_names": canonical_name_list(owner),
-            "file_patient_name": file_patient_name,
-            "owner_file_present": True,
-        }
+        if norm_new is not None:
+            if norm_new in canonical_name_set(owner):
+                return None
+            return {
+                "archive_patient_names": canonical_name_list(owner),
+                "file_patient_name": file_patient_name,
+                "owner_file_present": True,
+                "match_basis": "patient_name",
+            }
+        # No name on the file — fall back to the policy number if both the file
+        # and the owner card have one.
+        owner_policies = policy_number_set(owner)
+        if norm_policy is not None and owner_policies:
+            if norm_policy in owner_policies:
+                return None
+            return {
+                "archive_patient_names": canonical_name_list(owner),
+                "file_patient_name": None,
+                "file_policy_number": file_policy_number,
+                "archive_policy_numbers": list(owner["owner"].get("policy_numbers") or []),
+                "owner_file_present": True,
+                "match_basis": "policy_number",
+            }
+        return None
 
+    if norm_new is None:
+        return None
     known = db_known_patient_names(conn)
     if not known:
         return None
@@ -310,7 +338,8 @@ def save_to_archive(file_path: str, base_path: str, extraction: dict,
             }
         if not allow_patient_mismatch:
             mismatch = check_patient_identity(
-                conn, base_path, meta.get("patient_full_name")
+                conn, base_path, meta.get("patient_full_name"),
+                meta.get("policy_number"),
             )
             if mismatch is not None:
                 return {
@@ -355,14 +384,25 @@ def save_to_archive(file_path: str, base_path: str, extraction: dict,
     # Auto-create archive_owner.json on the first ingest with a non-null
     # patient name. The user is never asked to type their name.
     patient_name = meta.get("patient_full_name")
+    policy_number = meta.get("policy_number")
     if patient_name and read_owner_file(base_path) is None:
         owner = write_owner_file(
             base_path,
             patient_full_name=patient_name,
             patient_dob=meta.get("patient_dob"),
+            policy_numbers=[policy_number] if policy_number else None,
         )
         result["owner_file_created"] = True
         result["owner"] = owner["owner"]
+    elif policy_number and read_owner_file(base_path) is not None:
+        # Record any new policy number on the owner card so future files that
+        # lack a patient name can still be verified by policy number.
+        updated = owner_add_policy_number(base_path, policy_number)
+        if updated is not None and normalize_policy_number(policy_number) in {
+            normalize_policy_number(p)
+            for p in (updated["owner"].get("policy_numbers") or [])
+        }:
+            result["policy_numbers"] = updated["owner"].get("policy_numbers")
 
     return result
 
