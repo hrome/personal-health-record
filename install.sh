@@ -38,6 +38,11 @@ if [ "$PYTHON_VERSION" -lt 10 ]; then
     die "Python 3.10 or newer is required. You have $(python3 --version)."
 fi
 
+# Check unzip (used below to extract the downloaded archive)
+if ! command -v unzip &>/dev/null; then
+    die "unzip is not installed. Install it and re-run this script."
+fi
+
 # Check ~/.claude/skills exists
 if [ ! -d "$HOME/.claude/skills" ]; then
     die "Claude Code skills directory not found at ~/.claude/skills.\nMake sure Claude Code is installed: https://claude.ai/download"
@@ -46,7 +51,9 @@ fi
 # Handle existing installation
 if [ -d "$INSTALL_DIR" ]; then
     yellow "Skill already installed at $INSTALL_DIR"
-    read -r -p "Reinstall / update? [y/N] " answer
+    # Read from the terminal, not stdin: with `curl ... | bash` stdin is the
+    # script body itself, so a bare `read` would consume the script.
+    read -r -p "Reinstall / update? [y/N] " answer < /dev/tty
     case "$answer" in
         [yY]*) rm -rf "$INSTALL_DIR" ;;
         *) echo "Cancelled."; exit 0 ;;

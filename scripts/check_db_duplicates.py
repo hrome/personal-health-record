@@ -18,22 +18,23 @@ It checks, in order, and prints exactly one JSON object describing the outcome:
              -> any candidate identical: status "content_duplicate".
              -> same date but content differs: status "possible_duplicate".
 
-Usage:
+Usage (pass the extraction as a file — a heredoc puts raw JSON into the shell
+command, which trips the harness's brace-expansion check and forces an approval
+prompt on every call):
 
     python scripts/check_db_duplicates.py \\
       --base-path ~/medical-archive \\
       --file-path /path/to/file.pdf \\
-      --extraction - <<'EOF'
-    { ...the extraction Claude just produced... }
-    EOF
+      --extraction-file ~/medical-archive/.phr_tmp/<sha1>.json
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sqlite3
 import sys
+
+from common import get_db_path, sha1_of_file
 
 
 # document_type -> (table, primary date column, optional extra date column,
@@ -48,16 +49,8 @@ TYPE_MAP = {
 }
 
 
-def sha1_of_file(path: str) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def find_by_sha1(base_path: str, sha1: str) -> "dict | None":
-    db_path = os.path.join(base_path, "structured_database", "medical.db")
+    db_path = get_db_path(base_path)
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -69,7 +62,7 @@ def find_by_sha1(base_path: str, sha1: str) -> "dict | None":
 
 
 def find_candidates(base_path: str, document_type: str, document_date: str) -> list:
-    db_path = os.path.join(base_path, "structured_database", "medical.db")
+    db_path = get_db_path(base_path)
     table, date_col, extra_date_col, extra_cols = TYPE_MAP[document_type]
 
     select_cols = ["f.sha1", "f.original_filename", "f.import_timestamp",
@@ -162,6 +155,15 @@ def load_candidate_extraction(base_path: str, sha1: str) -> "dict | None":
 def check(base_path: str, file_path: str, extraction: dict) -> dict:
     original_filename = os.path.basename(file_path)
     sha1 = sha1_of_file(file_path)
+
+    # A brand-new archive has no database yet — save_extraction.py creates it on
+    # the first ingest. Nothing can be a duplicate of an archive with no records.
+    if not os.path.exists(get_db_path(base_path)):
+        return {"status": "no_match", "sha1": sha1,
+                "original_filename": original_filename,
+                "document_type": (extraction.get("document_type") or "").strip() or None,
+                "candidates": [],
+                "reason": "db_not_initialized"}
 
     # 1. Hash check
     record = find_by_sha1(base_path, sha1)

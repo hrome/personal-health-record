@@ -29,10 +29,12 @@ Every document goes through three layers stored in a folder of your choice:
 
 ```
 your-archive/
-├── original_files/       # original PDFs, stored unchanged
+├── archive_owner.json    # who this archive belongs to (created automatically)
+├── original_files/       # original files, stored unchanged
 ├── json_extractions/     # full structured extraction of each document
 └── structured_database/
-    └── medical.db        # SQLite database — fast queries across all documents
+    ├── medical.db        # SQLite database — fast queries across all documents
+    └── errors.log        # one line per failed ingest
 ```
 
 When you ask a question, Claude queries the database first. No re-reading PDFs on every question.
@@ -42,7 +44,7 @@ When you ask a question, Claude queries the database first. No re-reading PDFs o
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) installed
-- Python 3.10 or newer
+- Python 3.10 or newer (standard library only — no packages to install)
 
 ---
 
@@ -56,7 +58,9 @@ Open Terminal and run:
 curl -fsSL https://raw.githubusercontent.com/romahakov/personal-health-record/main/install.sh | bash
 ```
 
-The script downloads the skill, places it in the right folder, and installs dependencies automatically.
+The script checks your Python version, downloads the skill, and places it in the right
+folder. There are no third-party dependencies to install — the skill uses only the
+Python standard library.
 
 ---
 
@@ -121,6 +125,16 @@ Claude extracts all structured data within the same session and saves it to the 
 - Document content passes through Anthropic's infrastructure as part of the Claude session — the same as any conversation you have with Claude Code.
 - There is no separate batch ingestion API call and no dedicated server-side storage of your records.
 - Do not use this skill for other people's medical records without their consent.
+
+---
+
+## Development
+
+Run the test suite (standard library only, no test framework to install):
+
+```bash
+python3 -m unittest discover -s tests
+```
 
 ---
 

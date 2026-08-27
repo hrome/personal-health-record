@@ -6,16 +6,18 @@ import json
 import os
 import sqlite3
 import sys
+import urllib.parse
 
-
-def get_db_path(base_path: str) -> str:
-    return os.path.join(base_path, "structured_database", "medical.db")
+from common import get_db_path
 
 
 def run_query(db_path: str, sql: str) -> list[dict]:
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Database not found at {db_path}. Run init_db.py first.")
-    with sqlite3.connect(db_path) as conn:
+    # Read-only connection: this script only ever answers questions, and the SQL
+    # it runs is composed per request, so writes must be rejected by SQLite.
+    uri = f"file:{urllib.parse.quote(db_path)}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(sql)
         return [dict(row) for row in cursor.fetchall()]

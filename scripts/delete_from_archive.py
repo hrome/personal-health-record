@@ -9,6 +9,8 @@ import re
 import sqlite3
 import sys
 
+from common import get_db_path
+
 
 FILE_SHA1_TABLES = [
     "lab_indicators",
@@ -40,19 +42,19 @@ def validate_sha1(sha1: str) -> str:
     return normalized
 
 
-def get_db_path(base_path: str) -> str:
-    return os.path.join(base_path, "structured_database", "medical.db")
-
-
 def get_json_path(base_path: str, sha1: str) -> str:
     return os.path.join(base_path, "json_extractions", f"{sha1}.json")
 
 
-def get_original_file_path(base_path: str, sha1: str) -> str:
+def get_original_file_path(base_path: str, sha1: str) -> "str | None":
+    """Path of the archived original, or None if it is no longer on disk.
+
+    A missing original is not an error: the database row still has to be
+    removable, otherwise a record whose file was deleted by hand becomes
+    permanently stuck in the archive.
+    """
     matches = glob.glob(os.path.join(base_path, "original_files", f"{sha1}.*"))
-    if not matches:
-        raise FileNotFoundError(f"Original file not found for sha1={sha1}")
-    return matches[0]
+    return matches[0] if matches else None
 
 
 def load_json_metadata(base_path: str, sha1: str) -> dict:
@@ -125,7 +127,7 @@ def delete_from_archive(base_path: str, sha1: str) -> dict:
         conn.commit()
 
     original_deleted = False
-    if os.path.exists(original_path):
+    if original_path and os.path.exists(original_path):
         os.remove(original_path)
         original_deleted = True
 

@@ -19,7 +19,6 @@ Usage (preferred — pass the JSON via a file to avoid shell quoting/brace issue
 """
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -28,6 +27,8 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
+from common import sha1_of_file
+from delete_from_archive import delete_file_records
 from init_db import init_db
 from owner_file import (
     add_alias as owner_add_alias,
@@ -49,12 +50,21 @@ def _sv(v):
     return v
 
 
-def sha1_of_file(path: str) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def log_ingest_error(base_path: str, sha1: str, filename: str, error) -> None:
+    """Append one failure line to structured_database/errors.log.
+
+    Format (documented in SKILL.md): <timestamp> | <sha1> | <filename> | <error>
+    Logging must never mask the original failure, so all errors here are dropped.
+    """
+    message = " ".join(str(error).split())
+    line = f"{datetime.now(timezone.utc).isoformat()} | {sha1} | {filename} | {message}\n"
+    try:
+        log_dir = os.path.join(base_path, "structured_database")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "errors.log"), "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 def db_check_duplicate(conn: sqlite3.Connection, sha1: str) -> "dict | None":
@@ -303,7 +313,7 @@ def save_to_archive(file_path: str, base_path: str, extraction: dict,
     """
     original_filename = os.path.basename(file_path)
     sha1 = sha1_of_file(file_path)
-    db_path = os.path.join(base_path, "structured_database", "medical.db")
+    db_path = init_db(base_path)
 
     doc_type = extraction.get("document_type", "unknown")
     brief = extraction.get("brief_description", "")
@@ -350,25 +360,43 @@ def save_to_archive(file_path: str, base_path: str, extraction: dict,
                     **mismatch,
                 }
 
-    # Copy original file, preserving its extension
     orig_dir = os.path.join(base_path, "original_files")
-    os.makedirs(orig_dir, exist_ok=True)
-    ext = os.path.splitext(file_path)[1] or ".pdf"
-    shutil.copy2(file_path, os.path.join(orig_dir, f"{sha1}{ext}"))
-
-    # Save JSON extraction
     json_dir = os.path.join(base_path, "json_extractions")
+    os.makedirs(orig_dir, exist_ok=True)
     os.makedirs(json_dir, exist_ok=True)
-    with open(os.path.join(json_dir, f"{sha1}.json"), "w", encoding="utf-8") as f:
-        json.dump(extraction, f, ensure_ascii=False, indent=2)
+    ext = os.path.splitext(file_path)[1] or ".pdf"
+    archived_original = os.path.join(orig_dir, f"{sha1}{ext}")
+    json_extraction = os.path.join(json_dir, f"{sha1}.json")
 
-    # Write to SQLite
-    with sqlite3.connect(db_path) as conn:
-        db_insert_file(conn, sha1, original_filename, doc_type, brief, language)
-        inserter = DB_INSERTERS.get(doc_type)
-        if inserter:
-            inserter(conn, sha1, structured, meta)
-        conn.commit()
+    # An ingest must be all-or-nothing. If the database write fails after the
+    # original has been copied, the next run's filesystem dedup check would see
+    # {sha1}.* in original_files/ and skip the file forever, leaving it archived
+    # but absent from the database. Roll back whatever this run created.
+    created = [p for p in (archived_original, json_extraction) if not os.path.exists(p)]
+    try:
+        shutil.copy2(file_path, archived_original)
+
+        with open(json_extraction, "w", encoding="utf-8") as f:
+            json.dump(extraction, f, ensure_ascii=False, indent=2)
+
+        with sqlite3.connect(db_path) as conn:
+            if existing:
+                # Re-ingest (--force): drop the previous rows first, otherwise
+                # the typed tables accumulate a second copy of every lab event,
+                # visit, indicator, etc. for this file.
+                delete_file_records(conn, sha1)
+            db_insert_file(conn, sha1, original_filename, doc_type, brief, language)
+            inserter = DB_INSERTERS.get(doc_type)
+            if inserter:
+                inserter(conn, sha1, structured, meta)
+            conn.commit()
+    except Exception:
+        for path in created:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
 
     result: dict = {
         "sha1": sha1,
@@ -378,6 +406,9 @@ def save_to_archive(file_path: str, base_path: str, extraction: dict,
         "brief_description": brief,
         "language": language,
     }
+    if existing:
+        result["reprocessed"] = True
+        result["previous_import_timestamp"] = existing["import_timestamp"]
     if doc_type == "lab_result":
         result["indicators_count"] = len(structured.get("indicators") or [])
 
@@ -454,14 +485,17 @@ def main():
         print(f"File not found: {args.file_path}", file=sys.stderr)
         sys.exit(1)
 
-    init_db(args.base_path)
-
     try:
         result = save_to_archive(args.file_path, args.base_path, extraction,
                                  force=args.force,
                                  allow_patient_mismatch=args.allow_patient_mismatch,
                                  add_alias_first=args.add_alias)
     except Exception as e:
+        try:
+            sha1 = sha1_of_file(args.file_path)
+        except OSError:
+            sha1 = "-"
+        log_ingest_error(args.base_path, sha1, os.path.basename(args.file_path), e)
         print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
         sys.exit(1)
 

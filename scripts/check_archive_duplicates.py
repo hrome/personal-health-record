@@ -27,17 +27,10 @@ Usage:
 
 import argparse
 import glob
-import hashlib
 import json
 import os
 
-
-def sha1_of_file(path: str) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+from common import sha1_of_file
 
 
 def check_file(base_path: str, path: str) -> dict:

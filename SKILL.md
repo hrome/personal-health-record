@@ -410,9 +410,10 @@ manual approval on every call. Writing the JSON to a file first avoids this enti
 Write the extraction with the `Write` tool to **`<BASE_PATH>/.phr_tmp/<sha1>.json`**
 (use the SHA-1 from Step 1; create the `.phr_tmp/` directory if needed). Keeping the
 temp file **inside `BASE_PATH`** matters: `BASE_PATH` is an allowed working directory,
-so the write is not blocked as "outside allowed working directories", and the bundled
-permission rule (`Write(/Users/.../medical-archive/*/.phr_tmp/**)`) lets it run without a
-prompt. The same `.phr_tmp/<sha1>.json` file is reused for both the duplicate check and
+so the write is not blocked as "outside allowed working directories". To avoid a
+permission prompt on every file, add a rule like
+`Write(<BASE_PATH>/.phr_tmp/**)` to your Claude Code settings — the skill does not
+ship one, because the archive path differs per user. The same `.phr_tmp/<sha1>.json` file is reused for both the duplicate check and
 the save, then overwritten on any later re-ingest of the same file. It holds only PHI
 already destined for `json_extractions/`, so it stays within the archive's security
 boundary. Delete it once the file has been saved successfully (see Step 6).
@@ -421,7 +422,7 @@ boundary. Delete it once the file has been saved successfully (see Step 6).
 The filesystem check in Step 1 only catches byte-identical re-uploads. A second photo or re-scan of the same paper document has a different SHA-1 and would otherwise create a duplicate record. Before calling `save_extraction.py` for this file (PDF, image, anything), run the sequential check, passing the file and the extraction-file written above:
 
 ```bash
-python scripts/check_db_duplicates.py \
+python /path/to/skill/scripts/check_db_duplicates.py \
   --base-path <BASE_PATH> \
   --file-path <path_to_original_file> \
   --extraction-file <BASE_PATH>/.phr_tmp/<sha1>.json
@@ -431,7 +432,11 @@ The script hashes the file (hash check), then looks for a same-type document on 
 
 - `exact_duplicate` — this exact file is already in the database (matched by hash). Skip it: do not call `save_extraction.py`. Report it to the user with its existing `import_timestamp`. Highlight that it was not found in `original_files/`
 - `content_duplicate` — a same-date candidate whose extracted content is identical (`candidate.comparison.verdict: "identical"`). Show the candidate (`original_filename`, `import_timestamp`, `brief_description`) and the matched fields, recommend skipping as a duplicate, but confirm with the user before skipping. Only proceed to Step 6 if they say it is a different document.
-- `possible_duplicate` — a same-date candidate exists but the content differs (`verdict: "different"` / `"unknown"`). Show each candidate (`original_filename`, `import_timestamp`, `brief_description`, identifying fields like `laboratory_name` / `clinic_name` / `study_type`, and `comparison.differing_fields`) and ask:
+- `possible_duplicate` — a same-date candidate exists but the content differs (`verdict: "different"` / `"unknown"`). Handle by sub-case:
+
+  **Non-overlapping lab panels — auto-save without asking.** When the new file is a `lab_result` AND **every** candidate's `comparison.indicators` satisfies `matched == 0` with `only_new > 0` and `only_existing > 0`, the panels share no indicators in common — this is the common case of a single lab order being split across multiple per-test reports issued on the same day (e.g. Helix sample numbers `…582`, `…583`, `…584`, `…585`). Proceed to Step 6 directly. In the final Step 7 report, mention that other same-date `lab_result`s exist and list their `original_filename` + sample/order number so the user can spot a real duplicate after the fact.
+
+  **Otherwise — confirm with the user.** Show each candidate (`original_filename`, `import_timestamp`, `brief_description`, identifying fields like `laboratory_name` / `clinic_name` / `study_type`, and `comparison.differing_fields`) and ask:
   > "I already have a `{document_type}` dated `{document_date}` in the archive: `{candidate.original_filename}` ({candidate.brief_description}). Is this the same document, or a different one from the same day?"
 
   Only proceed to Step 6 after the user confirms it is a different document. If they confirm it is the same, skip the file (do not call `save_extraction.py`).
@@ -456,7 +461,7 @@ Owner Identity) — this happens only on the first qualifying ingest per archive
 
 Use the same extraction-file written in Step 5:
 ```bash
-python scripts/save_extraction.py \
+python /path/to/skill/scripts/save_extraction.py \
   --base-path <BASE_PATH> \
   --file-path <path_to_original_file> \
   --extraction-file <BASE_PATH>/.phr_tmp/<sha1>.json
@@ -545,7 +550,7 @@ For `lab_result`, `structured` must also contain an `indicators` array (one obje
 Use `query_db.py` for all structured data questions.
 
 ```bash
-python scripts/query_db.py --base-path <BASE_PATH> --sql "<SQL>" [--format table]
+python /path/to/skill/scripts/query_db.py --base-path <BASE_PATH> --sql "<SQL>" [--format table]
 ```
 
 ### Common query patterns
@@ -615,7 +620,7 @@ Deletion is supported only by **SHA-1 hash**. Do not accept filename-only deleti
 2. Run:
 
 ```bash
-python scripts/delete_from_archive.py --base-path <BASE_PATH> --sha1 <SHA1>
+python /path/to/skill/scripts/delete_from_archive.py --base-path <BASE_PATH> --sha1 <SHA1>
 ```
 
 3. Show the user a short summary from the returned JSON before deleting anything.
@@ -630,7 +635,7 @@ python scripts/delete_from_archive.py --base-path <BASE_PATH> --sha1 <SHA1>
 5. Only after the user confirms, run:
 
 ```bash
-python scripts/delete_from_archive.py \
+python /path/to/skill/scripts/delete_from_archive.py \
   --base-path <BASE_PATH> \
   --sha1 <SHA1> \
   --delete \
@@ -661,23 +666,23 @@ After confirmation, delete all archive data associated with that SHA-1:
 # Attach a file in chat or give Claude a file path.
 
 # Query the database
-python scripts/query_db.py \
+python /path/to/skill/scripts/query_db.py \
   --base-path ~/medical-archive \
   --sql "SELECT original_filename, document_type, brief_description FROM files" \
   --format table
 
 # Export all tables to CSV
-python scripts/export_csv.py \
+python /path/to/skill/scripts/export_csv.py \
   --base-path ~/medical-archive \
   --output-dir ~/medical-export
 
 # Inspect a file before deleting it
-python scripts/delete_from_archive.py \
+python /path/to/skill/scripts/delete_from_archive.py \
   --base-path ~/medical-archive \
   --sha1 <SHA1>
 
 # Delete a file after confirmation
-python scripts/delete_from_archive.py \
+python /path/to/skill/scripts/delete_from_archive.py \
   --base-path ~/medical-archive \
   --sha1 <SHA1> \
   --delete \
@@ -776,10 +781,14 @@ archive root.
 ## Error Handling
 
 - **Duplicate**: `{"status": "duplicate", "imported_on": "..."}` — no files modified.
+- **Reprocessed** (`--force`): a normal `status: "ingested"` result additionally carries
+  `"reprocessed": true` and `"previous_import_timestamp"`. The file's earlier rows are
+  removed from every typed table before the new ones are written, so re-ingesting never
+  doubles indicators or events. Tell the user the record was replaced, not added.
 - **Duplicate checks** (from `check_db_duplicates.py`, Step 5): the script returns one status from the sequential hash → date → content check.
   - `exact_duplicate` — the exact file is already in the DB (matched by hash). Skip it; report the existing `import_timestamp`.
   - `content_duplicate` — `{"candidates": [...]}` where a same-date candidate's `comparison.verdict` is `identical`. Near-certain re-scan; recommend skipping but confirm with the user.
-  - `possible_duplicate` — `{"candidates": [...]}` — another document of the same `document_type` is archived for the same `document_date` but the content differs. Surface the candidates (and `comparison.differing_fields`) and only save after the user confirms it is a different document.
+  - `possible_duplicate` — `{"candidates": [...]}` — another document of the same `document_type` is archived for the same `document_date` but the content differs. For `lab_result`s where every candidate has `comparison.indicators.matched == 0` with both `only_new > 0` and `only_existing > 0`, the panels do not overlap (split per-test reports from one lab order) — save without asking and mention the other same-date reports in the Step 7 summary. Otherwise, surface the candidates (and `comparison.differing_fields`) and only save after the user confirms it is a different document.
 - **Patient mismatch**: `{"status": "patient_mismatch", "archive_patient_names": [...], "file_patient_name": "...", "owner_file_present": true|false}` — no files modified. The file belongs to a different person than the active archive's owner. Surface the mismatch prompt from **Archive Owner Identity**; the preferred retry is `--add-alias` (when `owner_file_present: true` and the user confirms it's the same person), not `--allow-patient-mismatch`.
 - **No owner file when alias requested**: `{"status": "no_owner_file", ...}` — `--add-alias` was used against an archive with no `archive_owner.json` yet. Ingest a file with a known patient name first so the owner file can be auto-created.
 - **Owner file created**: a normal `status: "ingested"` result may additionally carry `"owner_file_created": true` and an `"owner"` object — surface the owner-identified announcement to the user (see Archive Owner Identity → Auto-creation).

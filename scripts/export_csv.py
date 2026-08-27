@@ -7,6 +7,8 @@ import os
 import sqlite3
 import sys
 
+from common import get_db_path
+
 
 ALL_TABLES = [
     "files", "lab_events", "lab_indicators", "doctor_visits",
@@ -22,10 +24,6 @@ DATE_COLUMNS = {
     "prescriptions": "prescription_date",
     "vaccinations": "vaccination_date",
 }
-
-
-def get_db_path(base_path: str) -> str:
-    return os.path.join(base_path, "structured_database", "medical.db")
 
 
 def export_table(conn: sqlite3.Connection, table: str, output_dir: str, since: str | None) -> str:
